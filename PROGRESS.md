@@ -564,8 +564,63 @@ first call, and the 500s seen before it was warm are still unexplained but are n
 steady state.
 
 `insurance_not_on_file` is not reachable with this MC — the authority check comes first
-and this carrier fails it — so that reason is verified by tests against the recorded
-payload and not yet by a live carrier that has authority but no filing on record.
+and this carrier fails it. It was reached with another one: **MC 778899** (BLUE TRUCKING
+LLC) comes back `fmcsa_rejected:insurance_not_on_file`, which is the first time a live
+carrier has exercised that reason, and the first proof from the outside that the authority
+check passes for a carrier that holds one.
+
+---
+
+## Diagnosing a 422, and the authority record (2026-10-01)
+
+Two things that were only invisible because the service could not see what a remote system
+sent.
+
+### The 422 line
+
+The platform's test panel returns 422 and there was no way to tell which field it sent
+wrong. The handler logged `exc.errors()` whole, which carries the offending input under
+`"input"` — so the line was both a poor diagnosis and a place a caller's value could land.
+
+It now prints one entry per failed field: path, error type, and pydantic's own wording.
+
+```
+WARNING app.api.errors: invalid request on /carriers/verify: body.mc_number: missing (Field required)
+WARNING app.api.errors: invalid request on /carriers/verify: body.mc_number: string_type (Input should be a valid string)
+WARNING app.api.errors: invalid request on /negotiations/counter: body.negotiation_id: extra_forbidden (Extra inputs are not permitted)
+```
+
+**A likely cause, from `docs/workflow-sample.json`.** The tool node builds its body out of
+use-case variables: `{"run_id": "{{$var:….run_id}}", "mc_number": "{{$var:….mc_number}}"}`.
+A panel run with either variable unset sends a body that is wrong in a way only this log
+can name — and if both are unset, the first failure reported will be `run_id`.
+
+### The authority record
+
+The last open `TODO: verify`. The carrier payload has no authority date, and the candidate
+source is the per-DOT authority endpoint — whose field names are as unverified as the
+carrier payload's were. So it is read the same way: fetch it, print it, keys and values,
+capped, web key redacted.
+
+```
+WARNING app.fmcsa.client: FMCSA authority record for DOT 3177404. TODO: verify the field
+names, then parse the grant date into authority_age_days. payload={"content": [...]}
+```
+
+It is fetched **only for a carrier that holds an authority**, which is what makes a date
+meaningful and keeps the second round trip off every call refused before then.
+`AuthorityCheck.authority_active` carries that fact, since "no authority" and "never got
+that far" are different things. The call is capped at 2 s and swallowed on failure: the
+verdict is already decided by the time it runs.
+
+**What is not proven.** The Render log has not been read, so whether the endpoint's path
+and shape are right is still open. The only external signal is latency, and it is weak:
+MC 778899 (two calls) answers in a median ~0.46 s against MC 123456's ~0.37 s — a delta of
+about 70 ms, which is one fast FMCSA round trip and is *consistent* with the extra call
+without being evidence of it. A wrong path would look the same from outside; it will show
+up in the log as a 404, which is the line the log prints for exactly that reason.
+
+**446 passed** (8 new tests).
 
 ### Open issues
 
