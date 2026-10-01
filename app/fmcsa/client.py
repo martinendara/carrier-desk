@@ -14,6 +14,7 @@ this flow; the call goes to a human. See DECISIONS.md.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import date, datetime, timezone
@@ -29,6 +30,10 @@ logger = logging.getLogger(__name__)
 _MC_RE = re.compile(r"^\d{1,8}$")
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
+
+#: How much of a payload goes on one log line. Long enough for a real carrier
+#: record with its nested lists, short enough that a log viewer stays readable.
+PAYLOAD_LOG_LIMIT = 2000
 
 #: Candidate key spellings, most likely first. TODO: verify against a real
 #: response and delete the losers.
@@ -149,6 +154,34 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+def describe_payload(payload: Any, secret: str = "") -> str:
+    """One bounded, single-line, secret-free view of what FMCSA actually sent.
+
+    Field names **and** values, on purpose. The names are what we guessed
+    wrong; the values are what settles a guess — `statusCode` only means
+    something next to the code it carries, and a `Y` next to `allowedToOperate`
+    is what proves the key is right. Without the body, closing a
+    `TODO: verify` is another guess, and the next wrong guess lands here again.
+
+    This is public registry data (a carrier's name and address), not a
+    credential — but the body is still passed through the redaction, because a
+    response that echoed the web key must not be the thing that leaks it, and
+    the line is capped so one pathological record cannot flood a log.
+    """
+    try:
+        text = json.dumps(payload, default=str, ensure_ascii=True)
+    except (TypeError, ValueError):  # a shape json cannot serialise at all
+        text = repr(payload)
+
+    if secret:
+        text = text.replace(secret, "***")
+
+    if len(text) > PAYLOAD_LOG_LIMIT:
+        text = f"{text[:PAYLOAD_LOG_LIMIT]}...[+{len(text) - PAYLOAD_LOG_LIMIT} chars]"
+
+    return text
+
+
 class FmcsaClient:
     """Looks a carrier up by MC number and decides whether it can be booked."""
 
@@ -229,6 +262,16 @@ class FmcsaClient:
     def _interpret(self, mc: str, payload: Any) -> AuthorityCheck:
         carrier = _find_carrier(payload)
         if carrier is None:
+            # FMCSA answered 200 with a shape that holds no carrier we can
+            # find. Logged with the body: this is either an MC that does not
+            # exist, or a response shape we have not seen, and the two are
+            # indistinguishable from here without looking.
+            logger.warning(
+                "FMCSA answered for MC %s but carried no carrier object. "
+                "TODO: verify the response shape. payload=%s",
+                mc,
+                describe_payload(payload, self._web_key),
+            )
             return AuthorityCheck(
                 eligible=False, mc_number=mc, reason=IneligibilityReason.NOT_FOUND
             )
@@ -251,10 +294,17 @@ class FmcsaClient:
 
         # Order follows CLAUDE.md §5: found, allowed, active, not out of service.
         if allowed is None or out_of_service is None or status is None:
+            # The line that closes the `TODO: verify` markers: which keys the
+            # record actually carries, and what they hold. `top_level` is
+            # printed separately because it survives truncation, and the field
+            # we are missing may well be one whose name we never guessed.
             logger.warning(
                 "FMCSA payload for %s did not carry the fields we need "
-                "(allowedToOperate/outOfService/statusCode). TODO: verify key names.",
+                "(allowedToOperate/outOfService/statusCode). TODO: verify key names. "
+                "top_level=%s payload=%s",
                 mc,
+                sorted(str(key) for key in carrier),
+                describe_payload(carrier, self._web_key),
             )
             return AuthorityCheck(
                 eligible=False, reason=IneligibilityReason.INCOMPLETE_RESPONSE, **common

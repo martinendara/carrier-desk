@@ -408,3 +408,86 @@ All four phases of CLAUDE.md §10.
   the badge in the README. No secrets and no `.env`: every test runs against the in-process
   fake TMS and a mocked FMCSA, so the job needs nothing from the environment. That absence
   is the point — it is what makes the badge mean something.
+
+---
+
+## Post-deploy — the service is live, and FMCSA answered (2026-10-01)
+
+**Status:** deployed by Martín on Render (free tier, Ohio) with `ENV=development` and
+`TMS_MODE=fake`, which is a development instance rather than the production path. The
+runbook in `docs/DEPLOY.md` was run against it. The service is reachable and behaves. The
+FMCSA field names are still not confirmed — but the response now lands in the log.
+
+### Runbook checks
+
+| Check | Result |
+|---|---|
+| `GET /health` | `{"status":"ok"}` |
+| Wrong `X-API-Key` | 401 `unauthorized` |
+| `POST /loads/search` before OTP | 403 `not_verified` |
+| `POST /carriers/verify`, `mc_number: "abc"` | 422 `invalid_mc` |
+| Unknown path | 404 `http_error` |
+| `POST /otp/send` | 200 — masked destination for the agent, code for the platform |
+| `POST /carriers/verify`, real MC | 200, but `fmcsa_rejected:incomplete_response` |
+
+No cold start was observed: the instance was already awake and every call answered in
+0.3–0.5 s.
+
+### The finding
+
+**FMCSA answers from Ohio.** The parser reads `legalName` and `dotNumber` correctly and then
+refuses every real carrier, because at least one of `allowedToOperate` / `outOfService` /
+`statusCode` is not a key the docket-number response carries.
+
+| MC | What FMCSA returned | What we decided |
+|---|---|---|
+| 123456 | `B MARRON LOGISTICS LLC`, DOT 3177404 | `incomplete_response` |
+| 778899 | `BLUE TRUCKING LLC`, DOT 2280021 | `incomplete_response` |
+| 445566 | `S & E TRUCKING COMPANY LLC`, DOT 1068411 | `incomplete_response` |
+| 998877 | `CLABORN ENTERPRISES LLC`, DOT 2864989 | `incomplete_response` |
+| 000000 | — | `not_found` — the FMCSA 404 path works |
+
+Failing closed on every real carrier is still failing closed, and the consequence is that
+100% of live calls would route to a human. `docs/DEPLOY.md` predicted exactly this outcome.
+
+### Anomaly, unresolved
+
+The **first five authenticated requests returned 500** `internal_error`. The same requests,
+minutes later, returned 200/403/422 as designed. Not reproducible locally, nor in a clean
+`docker build` of the same `Dockerfile` with the same `--env-file`. Whether that was the
+free instance waking, a rollout, or something else is unknown. A 500 during the start window
+is worse than a slow one: it reads as a broken integration rather than a cold host. The
+host's `unhandled error on <path>` line from that window is what would settle it.
+
+### Change: the payload goes to the log
+
+`app/fmcsa/client.py` now logs the carrier record — keys **and** values — on the two paths
+where a response is not understood, capped at 2000 characters and with the web key redacted
+if the body ever echoed it. `top_level` (the record's own key names) is printed separately
+so the names survive truncation, and a recognised payload still logs nothing. See
+`DECISIONS.md` §44 and the "After the first deploy" section of `docs/DEPLOY.md`.
+
+**433 passed**, 5 of them new: keys and values reach the log, top-level names survive
+truncation, an unrecognised wrapper is logged, the web key never reaches the log, and a
+healthy payload is not dumped.
+
+### Open issues
+
+Updated from the phase 4 list:
+
+1. **TMS token rejected** — unchanged. The deploy runs `TMS_MODE=fake`, so no live load has
+   been fetched there either.
+2. **FMCSA field names** — partly closed. `legalName` and `dotNumber` are **confirmed**
+   against real responses. `allowedToOperate`, `outOfService`, `statusCode`, the authority
+   date and `_ACTIVE_STATUS` remain open, pending the log line from the deploy.
+3. ~~FMCSA has never been called successfully~~ — **closed.** Called from a US region; it
+   answers, the 404 path works, and the eligibility decision runs end to end.
+4. **OTP delivery is not wired to the platform yet.** Unchanged.
+5. **Process-local state** (sessions, handoff queue, rate limiter) — unchanged; still one
+   replica, and the free tier restarts the process on every spin-down.
+6. **A restart loses in-flight calls.** Unchanged.
+7. **The deploy is no longer documented-but-unexecuted.** What is still untested is
+   `ENV=production` with `TMS_MODE=live` against the real platform.
+8. **The free tier sleeps.** Render's free web tier spins down after 15 minutes of no
+   traffic, which is why `docs/DEPLOY.md` recommends Railway for anything with a phone line
+   on it. The instance that is up now is a development deploy with a fake TMS.

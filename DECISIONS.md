@@ -816,3 +816,30 @@ a job with credentials is a job that can leak them.
 also means the workflow file stays readable, and a fork can run it.
 
 ---
+
+## 44. An unparsed FMCSA response is logged with its keys and values
+
+**Problem.** FMCSA answers only from a US region, so every field name in the parser was a
+guess with a `TODO: verify` next to it. The deploy that could settle those guesses returned
+`incomplete_response` — the response arrived, and at least one key we read is not the key
+FMCSA sends. From the outside that failure is opaque: the reason code says a field is
+missing, not which one, and nothing downstream exposes the body.
+
+**Choice.** When the payload cannot be interpreted, log the carrier record — names **and**
+values — on one line, capped at 2000 characters, with the web key redacted if it ever
+appears in the body. `top_level` (the record's own key names) is printed separately so it
+survives truncation.
+
+**Rejected.** *Log the key names only.* A name alone cannot settle a guess: `statusCode`
+is only proven by seeing the code it carries, and `_ACTIVE_STATUS` is a guess about values.
+*Log the raw body unbounded.* One pathological record floods the log it is meant to be
+readable in. *Add a debug endpoint that returns `raw`.* It would have to be reachable by
+the agent or by an unauthenticated caller, and the one thing this service must never leak
+is a value it has decided not to tell the agent.
+
+**Why.** This is public registry data, not a credential, and the log is the only place a
+US-region response can be read from Argentina. The line is a deliverable, so it is capped,
+redacted where it could matter, written only on the failure path (a recognised payload
+still logs nothing), and pinned by tests.
+
+---

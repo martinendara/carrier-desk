@@ -8,6 +8,7 @@ pin the behaviour down; they do not prove the field names are right.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 import httpx
@@ -15,6 +16,7 @@ import pytest
 from conftest import load_fmcsa_fixture
 
 from app.fmcsa import FmcsaClient, IneligibilityReason, McValidationError, validate_mc
+from app.fmcsa.client import PAYLOAD_LOG_LIMIT
 
 TODAY = date(2026, 10, 1)
 
@@ -285,3 +287,96 @@ def test_the_payload_is_kept_for_the_event_log():
 
     assert check.raw["phyState"] == "GA"
     assert "carrier" not in check.raw  # nested objects are dropped, not dumped
+
+
+# --- what we log when the shape is not what we expected -----------------
+#
+# These logs are how the `TODO: verify` markers get closed: FMCSA answers from
+# a US region only, so the first real payload is read out of a production log
+# rather than off a developer's screen. That makes this text a deliverable, and
+# it is pinned like one.
+
+
+def _warnings(caplog) -> str:
+    return caplog.text
+
+
+def test_an_unrecognised_field_set_is_logged_with_keys_and_values(caplog):
+    """Names tell us what we guessed wrong; values tell us what is right."""
+    payload = {
+        "content": {
+            "carrier": {
+                "legalName": "MYSTERY CARRIER",
+                "dockets": [{"number": "MC123456", "statusCode": "A"}],
+            }
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        client_for(payload).check("123456")
+
+    logged = _warnings(caplog)
+    assert "legalName" in logged
+    assert "MYSTERY CARRIER" in logged
+    # Nested values too: a `statusCode` that lives under `dockets` is exactly
+    # the kind of thing this line exists to reveal.
+    assert "MC123456" in logged
+
+
+def test_the_top_level_keys_survive_a_truncation(caplog):
+    """`top_level` is printed separately so a long body cannot hide the names."""
+    payload = {
+        "content": {
+            "carrier": {
+                "legalName": "BIG CO",
+                "somethingWeNeverGuessed": "x" * 5000,
+            }
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        client_for(payload).check("123456")
+
+    logged = _warnings(caplog)
+    assert "somethingWeNeverGuessed" in logged
+    assert "chars]" in logged
+    assert len(logged) < PAYLOAD_LOG_LIMIT + 1000
+
+
+def test_a_response_with_no_carrier_object_is_logged(caplog):
+    """200 with a shape we do not recognise is worth seeing, not just guessing."""
+    payload = {"status": "ok", "detail": "nothing that looks like a carrier"}
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        check = client_for(payload).check("123456")
+
+    assert check.reason is IneligibilityReason.NOT_FOUND
+    assert "no carrier object" in _warnings(caplog)
+    assert "nothing that looks like a carrier" in _warnings(caplog)
+
+
+def test_the_log_line_never_carries_the_web_key(caplog):
+    """The key is a query parameter, but a body that echoed it must not leak it."""
+    secret = "web-key-that-must-not-reach-a-log"
+    payload = {"content": {"carrier": {"legalName": "ECHO CO", "echo": secret}}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    client = FmcsaClient("https://x.test", secret, client=http, clock=lambda: TODAY)
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        client.check("123456")
+
+    assert secret not in _warnings(caplog)
+    assert "***" in _warnings(caplog)
+
+
+def test_a_recognised_payload_is_not_dumped_into_the_log(caplog):
+    """Otherwise every healthy call in production writes a carrier record."""
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        check = client_for(load_fmcsa_fixture("carrier_eligible")).check("123456")
+
+    assert check.eligible
+    assert "payload=" not in _warnings(caplog)

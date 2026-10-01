@@ -15,9 +15,13 @@ What was verified locally, and what was not:
 | `.env` is not baked into the image | verified |
 | `PORT` is honoured, healthcheck follows it | verified |
 | `ENV=production` + `TMS_MODE=fake` refuses to start (exit 1) | verified |
-| **An actual deploy to a US host** | **not done — needs your account** |
+| **An actual deploy to a US host** | **done** — Render free tier, Ohio, `ENV=development` + `TMS_MODE=fake` |
+| FMCSA answering a real response | verified — see "After the first deploy" |
+| `ENV=production` + `TMS_MODE=live` against the real tools | **not done** — the deploy above is a development instance |
 
-Everything below the "one command" line is a runbook, not something that has been run.
+Everything below the "one command" line was a runbook; it has since been run against the
+Render deployment, which is where the FMCSA findings in `PROGRESS.md` come from. The
+Railway path remains the recommendation for anything with a phone line attached to it.
 
 ## One command
 
@@ -112,6 +116,26 @@ been tested against a real response**, and it is what closes open issue #3 in
 `PROGRESS.md`. If it returns `fmcsa_rejected:incomplete_response`, the response came back
 but the field names in `app/fmcsa/client.py` are wrong; capture the real body, replace
 `tests/fixtures/fmcsa_*.json` with it, and delete the `TODO: verify` markers.
+
+The body does not have to be fetched by hand. That same call writes a warning line whose
+tail is the carrier record exactly as FMCSA sent it — field names **and** values, capped at
+2000 characters, with the web key redacted if the body ever echoed it:
+
+```
+WARNING app.fmcsa.client: FMCSA payload for 123456 did not carry the fields we need
+(allowedToOperate/outOfService/statusCode). TODO: verify key names.
+top_level=['allowedToOperate', 'dbaName', 'dockets', 'dotNumber', 'legalName', ...]
+payload={"allowedToOperate": "Y", "legalName": "B MARRON LOGISTICS LLC", ...}
+```
+
+Read it out of the host's logs (Render: the service's **Logs** tab). `top_level` is printed
+separately so the key names survive even when the body is truncated, and the whole line is
+one `grep` away:
+
+```bash
+# on the host, or paste the line into an issue
+grep "did not carry the fields we need" <service log>
+```
 
 Then point the HappyRobot workflow at `https://<your-host>` and set the API key in the tool
 configuration.
