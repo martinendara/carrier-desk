@@ -20,6 +20,7 @@ _SAY_BY_REASON = {
     IneligibilityReason.NOT_ALLOWED_TO_OPERATE: phrasing.CARRIER_NOT_ALLOWED,
     IneligibilityReason.AUTHORITY_INACTIVE: phrasing.CARRIER_INACTIVE,
     IneligibilityReason.OUT_OF_SERVICE: phrasing.CARRIER_OUT_OF_SERVICE,
+    IneligibilityReason.INSURANCE_NOT_ON_FILE: phrasing.CARRIER_INSURANCE,
 }
 
 
@@ -57,11 +58,11 @@ def verify_carrier(
     else:
         say = _SAY_BY_REASON.get(check.reason, phrasing.CARRIER_UNVERIFIED)
 
+    # The reason stays on this side of the wire: the agent gets a code
+    # (`fmcsa_rejected:...`) and a sentence, never the detail behind either.
     return CarrierVerifyResponse(
         eligible=check.eligible,
         result_code=check.result_code(),
         legal_name=check.legal_name,
-        dot_number=check.dot_number,
-        reason=check.reason.value if check.reason else None,
         say=say,
     )

@@ -4,8 +4,14 @@ A language model would give a different answer on Tuesday. This decides whether
 a carrier we cannot sell to today is worth a human's time, and it has to give
 the same answer for the same inputs every time, so it is a rule.
 
-The thresholds are the ones in CLAUDE.md §8. The FMCSA fields behind
-`authority_age_days` are `TODO: verify` — see `app/fmcsa/client.py`.
+The thresholds are the ones in CLAUDE.md §8.
+
+`authority_age_days` is **None for every carrier today**: the recorded FMCSA
+carrier payload carries no authority date, and the endpoint that might hold one
+has not been wired yet (`PROGRESS.md`). Every lead therefore takes the first
+rule and lands on `Review`. That is the rule working, not the rule failing —
+unknown is treated as unqualified rather than as old enough — but it does mean
+qualification is currently a constant until that date is sourced.
 """
 
 from __future__ import annotations

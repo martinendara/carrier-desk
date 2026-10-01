@@ -1,8 +1,9 @@
 """The authority picture we need, and the reasons we can refuse one.
 
-Field names in the FMCSA payload are **TODO: verify**. FMCSA blocks requests
-from Argentina (403 on the whole domain), so no real response has been recorded
-yet and every key below is read defensively — see `app/fmcsa/client.py`.
+The field names behind these values are recorded rather than guessed: they come
+from the live response captured on 2026-10-01, which lives in
+`tests/fixtures/fmcsa_carrier_recorded.json`. See `app/fmcsa/client.py` for
+which key feeds which decision.
 """
 
 from __future__ import annotations
@@ -16,8 +17,16 @@ class IneligibilityReason(str, Enum):
 
     NOT_FOUND = "not_found"
     NOT_ALLOWED_TO_OPERATE = "not_allowed_to_operate"
+    #: Neither common nor contract authority is in force. What a broker has to
+    #: check, and what `statusCode` does not tell you: the recorded response
+    #: carries `statusCode: "A"` with both authority statuses inactive.
     AUTHORITY_INACTIVE = "authority_inactive"
     OUT_OF_SERVICE = "out_of_service"
+    #: FMCSA states the required liability cover and shows nothing filed. Its
+    #: own reason, because it is a different phone call from an inactive
+    #: authority — this one a rep can fix by asking for a certificate. See
+    #: DECISIONS.md §46.
+    INSURANCE_NOT_ON_FILE = "insurance_not_on_file"
     #: The response came back but did not carry the fields we need. Treated as
     #: a refusal rather than a pass: see DECISIONS.md on failing closed.
     INCOMPLETE_RESPONSE = "incomplete_response"
@@ -38,9 +47,10 @@ class AuthorityCheck:
     legal_name: str | None = None
     dot_number: str | None = None
     reason: IneligibilityReason | None = None
-    #: Days since the authority was granted. None when the payload carried no
-    #: date we recognised — which onboarding treats as "unknown" and sends to
-    #: Review. TODO: verify the date field name.
+    #: Days since the authority was granted. **Always None today**: the carrier
+    #: payload carries no authority date at all, so there is nothing to measure
+    #: from. Onboarding reads unknown as Review, which is the safe direction.
+    #: The last open `TODO: verify` — see PROGRESS.md.
     authority_age_days: int | None = None
     #: Fields we parsed but do not model, kept so a mis-guessed key is visible
     #: in the event log instead of silently absent.

@@ -285,11 +285,11 @@ Full runbook, required variables and post-deploy checks: [`docs/DEPLOY.md`](docs
 - **The TMS token is rejected** (`AUTH_FAILED`) from this machine, so no live load has
   ever been fetched and the four protocol questions in `docs/tms-protocol.md` are
   unanswered. See `PROGRESS.md`.
-- **Every FMCSA field name is `TODO: verify`.** The domain returns 403 from Argentina, so
-  the fixtures in `tests/fixtures/fmcsa_*.json` are synthetic. The parser fails closed,
-  which is the safe direction but means a wrong key shows up as a business outcome.
-- **FMCSA has never been called successfully**, so only the fail-closed paths are tested
-  against reality.
+- **FMCSA field names are recorded, not guessed** — from the live response captured on
+  2026-10-01 (`tests/fixtures/fmcsa_carrier_recorded.json`). Two of them changed the
+  eligibility rule: `outOfService` does not exist (`oosDate` does), and `statusCode` is the
+  carrier record rather than the operating authority. The authority date is the one field
+  still unknown, so `authority_age_days` is always `None` and every lead lands on `Review`.
 - **Sessions and the handoff queue are in-memory and single-instance.** Redis behind the
   same interface is the production path.
 - **OTP delivery is not wired to the platform yet.** The service returns the two views in

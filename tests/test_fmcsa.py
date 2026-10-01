@@ -1,24 +1,22 @@
 """FMCSA client: parsing, eligibility, and failing closed.
 
-The payloads come from `tests/fixtures/fmcsa_*.json`, which are **synthetic**
-(see tests/fixtures/README.md): FMCSA returns 403 to the whole domain from
-Argentina, so nothing here has been recorded from the live service. These tests
-pin the behaviour down; they do not prove the field names are right.
+`tests/fixtures/fmcsa_carrier_recorded.json` is a **real response** — the live
+API answering MC 123456 on 2026-10-01, transcribed out of the service log of
+the US deploy. Every other case here is that payload with named fields changed
+(`fmcsa_payload`), so the distance between an eligible carrier and each way of
+refusing one is one key, visible in the test that asserts it.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 import httpx
 import pytest
-from conftest import load_fmcsa_fixture
+from conftest import ELIGIBLE_OVERRIDES, fmcsa_payload, load_fmcsa_fixture
 
 from app.fmcsa import FmcsaClient, IneligibilityReason, McValidationError, validate_mc
 from app.fmcsa.client import PAYLOAD_LOG_LIMIT
-
-TODAY = date(2026, 10, 1)
 
 
 def client_for(payload, *, status_code: int = 200, **overrides) -> FmcsaClient:
@@ -34,7 +32,6 @@ def client_for(payload, *, status_code: int = 200, **overrides) -> FmcsaClient:
         "https://mobile.fmcsa.dot.gov/qc/services",
         "test-key",
         client=http,
-        clock=lambda: TODAY,
         **overrides,
     )
 
@@ -45,8 +42,18 @@ def failing_client(exc: Exception) -> FmcsaClient:
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
     return FmcsaClient(
-        "https://mobile.fmcsa.dot.gov/qc/services", "test-key", client=http, clock=lambda: TODAY
+        "https://mobile.fmcsa.dot.gov/qc/services", "test-key", client=http
     )
+
+
+def recorded_carrier(**overrides) -> dict:
+    """The recorded payload made bookable, with `overrides` applied on top.
+
+    The two fields that stand between the real carrier and a booking are the
+    authority and the insurance filing, so most tests start from the version
+    where both are in order and change the one thing they are about.
+    """
+    return fmcsa_payload(**{**ELIGIBLE_OVERRIDES, **overrides})
 
 
 # --- MC validation ------------------------------------------------------
@@ -83,20 +90,23 @@ def test_an_invalid_mc_never_reaches_the_network():
 
 
 def test_an_eligible_carrier():
-    check = client_for(load_fmcsa_fixture("carrier_eligible")).check("123456")
+    check = client_for(recorded_carrier()).check("123456")
 
     assert check.eligible
-    assert check.legal_name == "RIDGELINE FREIGHT LLC"
-    assert check.dot_number == "3456789"
+    assert check.legal_name == "B MARRON LOGISTICS LLC"
+    # An int in the response, a string on the way out: the docs describe a
+    # string, the live API sends a number, and both are tolerated.
+    assert check.dot_number == "3177404"
     assert check.reason is None
     assert check.result_code() is None
 
 
-def test_the_authority_age_is_computed_from_the_date():
-    check = client_for(load_fmcsa_fixture("carrier_eligible")).check("123456")
+def test_the_authority_age_is_unknown_because_the_payload_has_no_date():
+    """The last open `TODO: verify`. Unknown, not guessed, and not zero."""
+    check = client_for(recorded_carrier()).check("123456")
 
-    # addDate 2019-04-11, "today" 2026-10-01. TODO: verify the date key.
-    assert check.authority_age_days == (TODAY - date(2019, 4, 11)).days
+    assert check.eligible
+    assert check.authority_age_days is None
 
 
 def test_the_request_carries_the_mc_and_the_key():
@@ -104,7 +114,7 @@ def test_the_request_carries_the_mc_and_the_key():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
-        return httpx.Response(200, json=load_fmcsa_fixture("carrier_eligible"))
+        return httpx.Response(200, json=recorded_carrier())
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
     FmcsaClient("https://mobile.fmcsa.dot.gov/qc/services", "secret-key", client=http).check(
@@ -119,19 +129,66 @@ def test_the_request_carries_the_mc_and_the_key():
 
 
 @pytest.mark.parametrize(
-    ("fixture", "reason"),
+    ("fields", "reason"),
     [
-        ("carrier_out_of_service", IneligibilityReason.OUT_OF_SERVICE),
-        ("carrier_inactive", IneligibilityReason.AUTHORITY_INACTIVE),
-        ("carrier_not_allowed", IneligibilityReason.NOT_ALLOWED_TO_OPERATE),
+        # The carrier as FMCSA actually sent it: allowed to operate, an active
+        # carrier record, and no operating authority of either kind.
+        ({"commonAuthorityStatus": "I", "contractAuthorityStatus": "N"}, IneligibilityReason.AUTHORITY_INACTIVE),
+        ({"allowedToOperate": "N"}, IneligibilityReason.NOT_ALLOWED_TO_OPERATE),
+        ({"oosDate": "20260115"}, IneligibilityReason.OUT_OF_SERVICE),
+        ({"bipdInsuranceOnFile": "0"}, IneligibilityReason.INSURANCE_NOT_ON_FILE),
     ],
 )
-def test_ineligible_carriers(fixture, reason):
-    check = client_for(load_fmcsa_fixture(fixture)).check("123456")
+def test_ineligible_carriers(fields, reason):
+    check = client_for(fmcsa_payload(**{**ELIGIBLE_OVERRIDES, **fields})).check("123456")
 
     assert not check.eligible
     assert check.reason is reason
     assert check.result_code() == f"fmcsa_rejected:{reason.value}"
+
+
+def test_contract_authority_on_its_own_is_enough():
+    """A carrier may run on either kind. Common is not the only way in."""
+    payload = fmcsa_payload(
+        commonAuthorityStatus="I", contractAuthorityStatus="A", bipdInsuranceOnFile="1"
+    )
+
+    assert client_for(payload).check("123456").eligible
+
+
+def test_the_recorded_carrier_is_refused_for_its_authority_not_its_insurance():
+    """Both are true of MC 123456. The authority is the one a rep can act on.
+
+    The order is deliberate: the authority is a statement about the carrier,
+    the insurance filing is a document that lags it.
+    """
+    check = client_for(load_fmcsa_fixture("carrier_recorded")).check("123456")
+
+    assert check.reason is IneligibilityReason.AUTHORITY_INACTIVE
+
+
+def test_an_unknown_insurance_requirement_is_not_a_rejection():
+    """"u" means FMCSA states no requirement, so there is nothing to hold to."""
+    payload = recorded_carrier(bipdInsuranceRequired="u", bipdInsuranceOnFile="0")
+
+    assert client_for(payload).check("123456").eligible
+
+
+def test_status_code_alone_does_not_make_a_carrier_eligible():
+    """`statusCode` is the carrier record, not the authority.
+
+    The recorded response is the proof: an active carrier record (`"A"`) with
+    both authority statuses inactive. Reading the first as the second would
+    have booked a carrier that cannot legally haul.
+    """
+    payload = fmcsa_payload(
+        statusCode="A",
+        commonAuthorityStatus="I",
+        contractAuthorityStatus="N",
+        bipdInsuranceOnFile="1",
+    )
+
+    assert client_for(payload).check("123456").reason is IneligibilityReason.AUTHORITY_INACTIVE
 
 
 def test_an_empty_result_is_not_found():
@@ -149,17 +206,19 @@ def test_a_404_is_not_found_not_an_outage():
 
 
 def test_the_order_of_checks_follows_the_spec():
-    """`not allowed` is reported before `inactive` when both are true."""
-    payload = {
-        "content": {
-            "carrier": {
-                "allowedToOperate": "N",
-                "statusCode": "I",
-                "outOfService": True,
-                "legalName": "X",
-            }
-        }
-    }
+    """Everything is wrong at once; the first rule in the order is reported.
+
+    A rep reads one reason and starts there, so which one comes first is a
+    decision, not an accident: "not allowed to operate" is the most
+    fundamental statement about a carrier, and the insurance filing the least.
+    """
+    payload = fmcsa_payload(
+        allowedToOperate="N",
+        commonAuthorityStatus="I",
+        contractAuthorityStatus="N",
+        oosDate="20260115",
+        bipdInsuranceOnFile="0",
+    )
     check = client_for(payload).check("123456")
 
     assert check.reason is IneligibilityReason.NOT_ALLOWED_TO_OPERATE
@@ -178,12 +237,11 @@ def test_a_payload_without_the_fields_we_need_fails_closed():
     assert check.reason is IneligibilityReason.INCOMPLETE_RESPONSE
 
 
-def test_a_carrier_with_no_recognised_date_is_still_eligible():
-    """A missing date costs the qualification, not the eligibility."""
-    check = client_for(load_fmcsa_fixture("carrier_no_date")).check("123456")
+def test_a_record_with_no_required_fields_at_all_is_not_eligible():
+    """An empty carrier object is not a carrier that passes."""
+    check = client_for({"content": {"carrier": {"legalName": "MYSTERY CARRIER"}}}).check("123456")
 
-    assert check.eligible
-    assert check.authority_age_days is None
+    assert check.reason is IneligibilityReason.INCOMPLETE_RESPONSE
 
 
 @pytest.mark.parametrize("code", [403, 500, 502, 429])
@@ -226,67 +284,39 @@ def test_a_non_json_body_fails_closed():
     assert check.reason is IneligibilityReason.VERIFICATION_UNAVAILABLE
 
 
-# --- defensive parsing --------------------------------------------------
-
-
-def test_alternate_key_spellings_and_date_formats_still_parse():
-    """TODO: verify — these are guesses about how FMCSA might spell things."""
-    check = client_for(load_fmcsa_fixture("carrier_alternate_keys")).check("123456")
-
-    assert check.eligible
-    assert check.legal_name == "COASTAL BEND CARRIERS"
-    assert check.dot_number == "5554443"
-    assert check.authority_age_days == (TODAY - date(2024, 3, 15)).days
+# --- the wrapper around the carrier -------------------------------------
+#
+# The response we recorded was logged as the carrier object itself — the
+# wrapper is what our own parser stripped on the way in, so it is the one thing
+# that response did not settle. These pin the tolerance that remains.
 
 
 def test_a_bare_carrier_object_without_a_wrapper_parses():
-    payload = {
-        "allowedToOperate": "Y",
-        "legalName": "NO WRAPPER LLC",
-        "statusCode": "A",
-        "outOfService": False,
-    }
+    payload = recorded_carrier()["content"][0]["carrier"]
 
     assert client_for(payload).check("123456").eligible
 
 
-def test_a_list_content_wrapper_parses():
-    payload = {
-        "content": [
-            {
-                "carrier": {
-                    "allowedToOperate": "Y",
-                    "legalName": "LISTED LLC",
-                    "statusCode": "A",
-                    "outOfService": False,
-                }
-            }
-        ]
-    }
+def test_a_content_object_wrapper_parses():
+    payload = {"content": recorded_carrier()["content"][0]}
 
-    assert client_for(payload).check("123456").legal_name == "LISTED LLC"
+    assert client_for(payload).check("123456").legal_name == "B MARRON LOGISTICS LLC"
 
 
 def test_boolean_flags_are_accepted_as_booleans():
-    payload = {
-        "content": {
-            "carrier": {
-                "allowedToOperate": True,
-                "statusCode": "A",
-                "outOfService": False,
-                "legalName": "BOOL CO",
-            }
-        }
-    }
+    payload = recorded_carrier(allowedToOperate=True)
 
     assert client_for(payload).check("123456").eligible
 
 
 def test_the_payload_is_kept_for_the_event_log():
-    check = client_for(load_fmcsa_fixture("carrier_eligible")).check("123456")
+    check = client_for(recorded_carrier()).check("123456")
 
     assert check.raw["phyState"] == "GA"
-    assert "carrier" not in check.raw  # nested objects are dropped, not dumped
+    # Nested containers are dropped, not dumped...
+    assert "carrierOperation" not in check.raw
+    # ...and the tax id is not kept at all.
+    assert check.raw["ein"] == "***"
 
 
 # --- what we log when the shape is not what we expected -----------------
@@ -364,7 +394,7 @@ def test_the_log_line_never_carries_the_web_key(caplog):
         return httpx.Response(200, json=payload)
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
-    client = FmcsaClient("https://x.test", secret, client=http, clock=lambda: TODAY)
+    client = FmcsaClient("https://x.test", secret, client=http)
 
     with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
         client.check("123456")
@@ -376,7 +406,18 @@ def test_the_log_line_never_carries_the_web_key(caplog):
 def test_a_recognised_payload_is_not_dumped_into_the_log(caplog):
     """Otherwise every healthy call in production writes a carrier record."""
     with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
-        check = client_for(load_fmcsa_fixture("carrier_eligible")).check("123456")
+        check = client_for(recorded_carrier()).check("123456")
 
     assert check.eligible
     assert "payload=" not in _warnings(caplog)
+
+
+def test_the_tax_id_never_reaches_the_log(caplog):
+    """The one field in the record that is nobody's business here."""
+    payload = {"content": {"carrier": {"legalName": "MYSTERY CARRIER", "ein": "12-3456789"}}}
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        client_for(payload).check("123456")
+
+    assert "12-3456789" not in _warnings(caplog)
+    assert '"ein": "***"' in _warnings(caplog)

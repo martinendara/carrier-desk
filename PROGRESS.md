@@ -491,3 +491,72 @@ Updated from the phase 4 list:
 8. **The free tier sleeps.** Render's free web tier spins down after 15 minutes of no
    traffic, which is why `docs/DEPLOY.md` recommends Railway for anything with a phone line
    on it. The instance that is up now is a development deploy with a fake TMS.
+
+---
+
+## The parser meets a real payload (2026-10-01)
+
+**Status:** the recorded response closed the `TODO: verify` markers the deploy opened. Two
+of the guesses were wrong in ways that mattered, and one field the decision depended on
+turns out not to exist at all.
+
+### What the recorded payload settled
+
+| Field | Verdict |
+|---|---|
+| `legalName`, `dotNumber` | correct — and `dotNumber` is an **integer**, not the string the docs describe |
+| `allowedToOperate` | correct (`"Y"` / `"N"`) |
+| `statusCode` | exists, but is **not the authority**: the record carries `"A"` with both authority statuses inactive |
+| `outOfService` | **does not exist.** The nearest field is `oosDate`, which is null for this carrier |
+| `commonAuthorityStatus`, `contractAuthorityStatus` | the real authority signal — `"I"` and `"N"` here |
+| `bipdInsuranceRequired` / `bipdInsuranceOnFile` | the required liability cover, and nothing filed |
+| authority date | **not in the record at all** — see the open issue below |
+
+In the end, this carrier is refused for its authority, not for the insurance: the record
+is allowed to operate and its carrier record is active, and neither kind of operating
+authority is in force.
+
+### The rule now
+
+`allowedToOperate == "Y"` and at least one of common / contract authority `"A"` and
+`oosDate` null — with insurance after those, a reason each:
+`not_allowed_to_operate`, `authority_inactive`, `out_of_service`, `insurance_not_on_file`.
+Both new decisions are in `DECISIONS.md` (§45 the authority, §46 the insurance, §47 the
+four fields the agent is handed, §48 the unknown age).
+
+### What the agent is handed
+
+`{eligible, result_code, legal_name, say}`. Nothing else: no DOT number, no reason code,
+no insurance, no address, no tax id. `ein` is stripped on the way in, so it is not in
+`raw`, not in an event and not in a log line.
+
+### Fixtures
+
+Six synthetic files deleted. One recorded response is the source
+(`tests/fixtures/fmcsa_carrier_recorded.json`), and every other carrier in the tests is
+that payload with named fields changed — `fmcsa_payload(**overrides)` in `conftest.py`.
+An eligible carrier and each of the four rejections are one key apart, and the test that
+asserts each reason shows which key.
+
+The wrapper around the carrier object is the one thing still assumed: what the log carried
+was the carrier record, because that is what our own parser had already stripped.
+
+**438 passed** (5 new tests).
+
+### Open issues
+
+Updated:
+
+2. **FMCSA field names** — closed for everything the payload carries. `legalName`,
+   `dotNumber`, `allowedToOperate`, `statusCode`, the two authority statuses, `oosDate` and
+   the insurance pair are all read from a real response now.
+3. ~~FMCSA has never been called successfully~~ — closed.
+4. **The authority date is the last `TODO: verify`.** The record has no authority date, so
+   `authority_age_days` is `None` for every carrier and onboarding sends every lead to
+   `Review`. The candidate source is the per-DOT authority endpoint
+   (`/carriers/{dotNumber}/authority`), which is **unverified** — it has not been called
+   from a US region. Until it is, `Review` is the answer, not a guess.
+5. **OTP delivery is not wired to the platform yet.** Unchanged.
+6. **Process-local state** (sessions, handoff queue, rate limiter) — unchanged.
+7. **A restart loses in-flight calls.** Unchanged.
+8. **The free tier sleeps.** Unchanged.

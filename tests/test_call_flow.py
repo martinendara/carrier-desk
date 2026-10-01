@@ -15,7 +15,7 @@ from fractions import Fraction
 
 import httpx
 import pytest
-from conftest import OTP_SECRET, TickClock, load_fmcsa_fixture
+from conftest import ELIGIBLE_OVERRIDES, OTP_SECRET, TickClock, fmcsa_payload
 from helpers import RECORDED_CEILING, make_load
 
 from app.events import EventType, InMemoryEventSink
@@ -51,11 +51,13 @@ def collect_numbers(value, found=None) -> list[int]:
     return found
 
 
-def fmcsa_for(fixture: str) -> FmcsaClient:
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json=load_fmcsa_fixture(fixture))
-    )
+def fmcsa_for(payload: dict) -> FmcsaClient:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
     return FmcsaClient("https://fmcsa.test", "key", client=httpx.Client(transport=transport))
+
+
+#: The recorded carrier, with the two fields that make it bookable in order.
+BOOKABLE = fmcsa_payload(**ELIGIBLE_OVERRIDES)
 
 
 def engine_for(store, events, tick: TickClock) -> NegotiationEngine:
@@ -77,7 +79,7 @@ def test_a_full_call_never_puts_the_ceiling_in_front_of_the_agent(
     agent_facing: list[object] = []
 
     # --- 1. Verify the carrier ------------------------------------------
-    check = fmcsa_for("carrier_eligible").check(MC)
+    check = fmcsa_for(BOOKABLE).check(MC)
     events.emit(RUN, EventType.FMCSA_CHECKED, mc_number=MC, eligible=check.eligible)
     agent_facing.append({"eligible": check.eligible, "legal_name": check.legal_name})
     assert check.eligible
@@ -127,7 +129,7 @@ def test_a_full_call_never_puts_the_ceiling_in_front_of_the_agent(
 
 
 def test_the_event_log_covers_every_step_of_the_call(store, tick, events):
-    fmcsa_for("carrier_eligible").check(MC)
+    fmcsa_for(BOOKABLE).check(MC)
     otp = OtpService(store, secret=OTP_SECRET, clock=tick, sink=events)
     dispatch = otp.send(RUN, MC)
     otp.verify(RUN, dispatch.code)
@@ -154,7 +156,7 @@ def test_a_search_that_matches_nothing_is_still_recorded(store, tick, events):
 
 def test_a_carrier_we_cannot_verify_never_gets_an_otp(store, tick, events):
     """FMCSA fails closed, and a rejected carrier never reaches the OTP step."""
-    check = fmcsa_for("carrier_out_of_service").check(MC)
+    check = fmcsa_for(fmcsa_payload(**ELIGIBLE_OVERRIDES, oosDate="20260115")).check(MC)
     events.emit(RUN, EventType.FMCSA_CHECKED, mc_number=MC, eligible=check.eligible)
 
     assert not check.eligible

@@ -6,6 +6,7 @@ that fails at 23:59.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,8 +39,31 @@ class FakeClock:
 
 
 def load_fmcsa_fixture(name: str) -> dict:
-    """Load one of the synthetic FMCSA payloads. See tests/fixtures/README.md."""
+    """Load a recorded FMCSA payload. See tests/fixtures/README.md."""
     return json.loads((FIXTURES / f"fmcsa_{name}.json").read_text(encoding="utf-8"))
+
+
+#: The two fields that stand between the recorded carrier and a booking:
+#: operating authority in force, and the required liability cover filed.
+#: Everything else is the response exactly as FMCSA sent it.
+ELIGIBLE_OVERRIDES = {
+    "commonAuthorityStatus": "A",
+    "bipdInsuranceOnFile": "1",
+}
+
+
+def fmcsa_payload(**overrides) -> dict:
+    """The recorded response, with named carrier fields changed.
+
+    One recorded payload and every variant written as a delta from it. Six
+    copies of a fifty-field record would drift apart, and a test that says
+    which single field it flips is a test that explains its own case: the
+    rejection reasons differ from the eligible carrier by one key each, which
+    is the property worth pinning.
+    """
+    payload = copy.deepcopy(load_fmcsa_fixture("carrier_recorded"))
+    payload["content"][0]["carrier"].update(overrides)
+    return payload
 
 
 class TickClock:

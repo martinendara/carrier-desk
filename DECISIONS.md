@@ -843,3 +843,93 @@ redacted where it could matter, written only on the failure path (a recognised p
 still logs nothing), and pinned by tests.
 
 ---
+
+## 45. Eligibility reads the authority statuses, not `statusCode`
+
+**Problem.** The recorded response carries `statusCode: "A"` — an active carrier record —
+next to `commonAuthorityStatus: "I"` and `contractAuthorityStatus: "N"`. Reading
+`statusCode` as the authority would have booked a carrier with no operating authority,
+which is the failure this check exists to prevent. The parser also read `outOfService`,
+a field the response does not have.
+
+**Choice.** Eligible means `allowedToOperate == "Y"` **and** at least one of
+`commonAuthorityStatus` / `contractAuthorityStatus` is `"A"` **and** `oosDate` is null,
+each with its own reason. Either kind of authority will do: a carrier may haul on common
+or on contract.
+
+**Rejected.** *Keep `statusCode` as a second signal.* It answers a different question — is
+this an active carrier record — and adding it back would refuse carriers on a field that
+says nothing about authority. *Require common authority specifically.* Contract carriers
+would be refused for being contract carriers.
+
+**Why.** The evidence is the recorded payload itself, not the documentation. `statusCode`
+stays parsed, in `raw`, where it costs nothing and can explain a decision to a rep later.
+
+---
+
+## 46. Missing liability insurance is a rejection, not an alert
+
+**Problem.** The recorded carrier has `bipdInsuranceRequired: "Y"` and
+`bipdInsuranceOnFile: "0"`: FMCSA says the cover is required and shows nothing filed. A
+broker that dispatches a carrier without it is exposed on every mile of that load.
+
+**Choice.** A rejection with its own reason, `insurance_not_on_file`, checked after the
+authority. `"u"` (unknown) on the requirement is **not** a rejection — FMCSA is stating no
+requirement, so there is nothing to hold the carrier to.
+
+**Rejected.** *A flag for the rep, letting the call continue.* There is no channel for it.
+The service books autonomously at the end of a call; a warning nothing reads is not a
+check. *Ignore FMCSA's insurance fields and rely on a certificate of insurance.* That is
+what a rep does by hand, and it halts the same call anyway — but later, after the
+conversation has been had, and by someone who was not on the line.
+
+**Why.** The costs are not symmetric. A wrong rejection routes a call to a rep, who sees
+the reason code and fixes it in seconds. A wrong acceptance dispatches a load behind no
+insurance. The known cost is that FMCSA filings lag reality, so carriers with valid cover
+can be refused and sent to a human — the direction to be wrong in.
+
+---
+
+## 47. The agent is told four fields, and none of them is from the record
+
+**Problem.** The response carried the DOT number and the reason code alongside the name.
+The FMCSA record behind it also holds an address, an EIN and six insurance fields. The
+agent speaks its response out loud and the platform keeps a transcript; anything handed to
+it can end up in both.
+
+**Choice.** `{eligible, result_code, legal_name, say}`. Nothing else. The reason travels
+inside `result_code` as `fmcsa_rejected:<reason>`, which is the closed set CLAUDE.md §8
+already defines, and the record's other fields stay in the event log where a rep can read
+them.
+
+**Rejected.** *Return `dot_number` too, "it is public".* Public is not the test; the test
+is whether handing it to the agent helps at all. *Drop `result_code` as well.* It is how
+the platform routes a refusal, and dropping it would leave a rejection with no
+machine-readable reason anywhere.
+
+**Why.** The agent cannot leak what it was never handed. `ein` is stripped on the way in
+as well — it survives nowhere in this service, not even in `raw` — because the cheapest
+way to be sure a tax id cannot surface is not to carry it.
+
+---
+
+## 48. `authority_age_days` is unknown, and stays unknown until it is sourced
+
+**Problem.** Onboarding's first rule is the age of the carrier's authority. The recorded
+payload has no authority date: no `addDate`, no `authDate`, no census date. The parser was
+reading five candidate spellings of a field that does not exist.
+
+**Choice.** Stop parsing a date. `authority_age_days` is `None` for every carrier, which
+CLAUDE.md §8 already defines as "unknown", which lands every lead on `Review`.
+
+**Rejected.** *Keep the candidate date keys.* They are guesses that have now been tested
+and found wrong; leaving them in is how a wrong answer survives contact with a real
+payload. *Use `mcs150Outdated` or a safety-review date as a proxy.* Neither is the
+authority date, and a proxy that is usually right is a rule that is sometimes wrong, and
+silently so.
+
+**Why.** `Review` is the honest answer — a human looks. The cost is that qualification is
+currently a constant, and that is visible in `PROGRESS.md` as the last open `TODO: verify`
+rather than hidden behind a plausible-looking number.
+
+---

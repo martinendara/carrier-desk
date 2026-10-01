@@ -1,15 +1,25 @@
 """FMCSA authority check.
 
-**Every field name read here is `TODO: verify`.** FMCSA blocks the whole domain
-from Argentina (403), so no real response has been recorded yet; the shapes this
-parses come from the public API documentation and from the fixture in
-`tests/fixtures/fmcsa_*.json`, which is synthetic. The parser therefore reads
-keys defensively — several spellings, several date formats — and reports
-`incomplete_response` rather than guessing when a signal is missing.
+**These field names are recorded, not guessed.** The payload in
+`tests/fixtures/fmcsa_carrier_recorded.json` came back from the live API on
+2026-10-01 — MC 123456, the first real response this service ever saw — and
+every key read below is a key that response carries. What it settled is written
+next to each constant; what it left open (the authority date, and therefore
+`authority_age_days`) is in `PROGRESS.md`.
 
-**It fails closed.** A timeout, a 5xx, a 403, a body we cannot read: all of them
-mean `eligible=False`. A carrier who cannot be verified is not booked through
-this flow; the call goes to a human. See DECISIONS.md.
+Two things that response changed, beyond the names:
+
+* **`outOfService` does not exist.** The nearest field is `oosDate`, a date,
+  where null means no order on file.
+* **`statusCode` is not the authority.** The recorded response carries
+  `statusCode: "A"` next to `commonAuthorityStatus: "I"` — an active carrier
+  record whose operating authority is inactive. Eligibility reads the two
+  authority statuses instead. See DECISIONS.md §45.
+
+**It fails closed.** A timeout, a 5xx, a 403, a body we cannot read, a record
+missing a field the decision needs: all of them mean `eligible=False`. A carrier
+who cannot be verified is not booked through this flow; the call goes to a
+human. See DECISIONS.md.
 """
 
 from __future__ import annotations
@@ -17,8 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -35,26 +44,42 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 #: record with its nested lists, short enough that a log viewer stays readable.
 PAYLOAD_LOG_LIMIT = 2000
 
-#: Candidate key spellings, most likely first. TODO: verify against a real
-#: response and delete the losers.
-_LEGAL_NAME_KEYS = ("legalName", "legal_name", "name")
-_DOT_KEYS = ("dotNumber", "dot_number", "usdotNumber")
-_ALLOWED_KEYS = ("allowedToOperate", "allowed_to_operate")
-_OUT_OF_SERVICE_KEYS = ("outOfService", "out_of_service", "oos")
-_STATUS_KEYS = ("statusCode", "status_code", "status")
-_AUTHORITY_DATE_KEYS = (
-    "addDate",
-    "authDate",
-    "authorityDate",
-    "originalActionDate",
-    "mcs150Date",
-)
+#: Fields dropped before anything is written down, in a log or an event. The
+#: registry publishes them, but nothing here needs them, and the cheapest way
+#: to be sure a tax id cannot leak is to take it out at the edge.
+REDACTED_FIELDS = frozenset({"ein"})
 
-_TRUE_FLAGS = {"y", "yes", "true", "1", "a"}
+# --- field names, taken from the recorded response ----------------------
+#
+# A tuple even for a single name: `_first` also skips a blank value, and a
+# second spelling can be added later without touching the rule that reads it.
+
+#: "B MARRON LOGISTICS LLC".
+_LEGAL_NAME_KEYS = ("legalName",)
+#: 3177404 — an **integer** in the response, where the documentation describes
+#: a string. Both are read, because both are plausibly out there.
+_DOT_KEYS = ("dotNumber",)
+#: "Y".
+_ALLOWED_KEYS = ("allowedToOperate",)
+#: Operating authority, which is what a broker has to check and what a carrier
+#: needs in order to haul for one. Either kind will do: a carrier may run on
+#: common authority or on contract authority.
+_COMMON_AUTHORITY_KEYS = ("commonAuthorityStatus",)
+_CONTRACT_AUTHORITY_KEYS = ("contractAuthorityStatus",)
+#: A date, not a flag. Null means no out-of-service order on file.
+_OOS_DATE_KEYS = ("oosDate",)
+#: BI&PD — the liability cover the carrier is required to carry. `Required` is
+#: what FMCSA says the carrier must hold; `OnFile` is what has actually been
+#: filed with it.
+_BIPD_REQUIRED_KEYS = ("bipdInsuranceRequired",)
+_BIPD_ON_FILE_KEYS = ("bipdInsuranceOnFile",)
+
+_TRUE_FLAGS = {"y", "yes", "true", "1"}
 _FALSE_FLAGS = {"n", "no", "false", "0"}
 
-#: `statusCode` meaning an active authority. TODO: verify.
-_ACTIVE_STATUS = {"a", "active"}
+#: An authority status meaning the authority is in force. "I" is inactive and
+#: "N" is not held; anything unrecognised is not an active authority either.
+_ACTIVE_AUTHORITY = {"a"}
 
 
 class McValidationError(ValueError):
@@ -100,8 +125,63 @@ def _flag(value: Any) -> bool | None:
     return None
 
 
+def _active_authority(value: Any) -> bool:
+    """True when an authority status means the authority is in force."""
+    return isinstance(value, str) and value.strip().lower() in _ACTIVE_AUTHORITY
+
+
+def _has_out_of_service_order(value: Any) -> bool:
+    """A date on `oosDate` is an order that was issued.
+
+    Absent and null are read the same way: no order on file is the normal
+    state, and treating a missing field as "unknown" here would send every
+    carrier to a human — which is the failure this parser has just come out of.
+    """
+    return value is not None
+
+
+def _insurance_not_on_file(carrier: dict[str, Any]) -> bool:
+    """FMCSA states liability cover is required and shows nothing filed.
+
+    "u" on the requirement is *not* a rejection: FMCSA is saying the
+    requirement is unstated, so there is nothing to hold the carrier to. On the
+    filing side anything that is not a clear yes counts as missing — an
+    unknown filing against a stated requirement is not a yes.
+    """
+    required = _flag(_first(carrier, _BIPD_REQUIRED_KEYS))
+    on_file = _flag(_first(carrier, _BIPD_ON_FILE_KEYS))
+    return required is True and on_file is not True
+
+
+def _without_redacted(value: Any) -> Any:
+    """A copy of a payload with the fields we never write down removed."""
+    if isinstance(value, dict):
+        return {
+            key: ("***" if key in REDACTED_FIELDS else _without_redacted(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_redacted(item) for item in value]
+    return value
+
+
+def _flat_fields(carrier: dict[str, Any]) -> dict[str, Any]:
+    """The record's own scalar fields, nested containers and secrets removed."""
+    return {
+        key: ("***" if key in REDACTED_FIELDS else value)
+        for key, value in carrier.items()
+        if not isinstance(value, (dict, list))
+    }
+
+
 def _find_carrier(payload: Any) -> dict[str, Any] | None:
-    """Dig the carrier object out of whatever wrapper FMCSA used today."""
+    """Dig the carrier object out of the wrapper around it.
+
+    Still tolerant on purpose. The response we recorded was logged as the
+    carrier object — the wrapper is what our own parser stripped on the way in,
+    so the shape around it (`content` as a list, as an object, or absent) is
+    the one thing this response did not settle.
+    """
     if isinstance(payload, list):
         for item in payload:
             found = _find_carrier(item)
@@ -112,8 +192,6 @@ def _find_carrier(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
 
-    # The documented shape is {"content": {"carrier": {...}}} or the same with
-    # "content" as a list. Accept a bare carrier object too.
     for wrapper in ("content", "carrier"):
         if wrapper in payload:
             found = _find_carrier(payload[wrapper])
@@ -125,51 +203,20 @@ def _find_carrier(payload: Any) -> dict[str, Any] | None:
     return None
 
 
-def _parse_date(value: Any) -> date | None:
-    """Parse the several date shapes FMCSA is known to emit. TODO: verify."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if not isinstance(value, str):
-        return None
-
-    text = value.strip()
-    if not text:
-        return None
-
-    # ISO-ish, with or without a time part.
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
-    except ValueError:
-        pass
-
-    for pattern in ("%Y%m%d", "%m/%d/%Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(text, pattern).date()
-        except ValueError:
-            continue
-    return None
-
-
 def describe_payload(payload: Any, secret: str = "") -> str:
     """One bounded, single-line, secret-free view of what FMCSA actually sent.
 
-    Field names **and** values, on purpose. The names are what we guessed
-    wrong; the values are what settles a guess — `statusCode` only means
-    something next to the code it carries, and a `Y` next to `allowedToOperate`
-    is what proves the key is right. Without the body, closing a
-    `TODO: verify` is another guess, and the next wrong guess lands here again.
+    Field names **and** values, on purpose. The names are what we got wrong;
+    the values are what settles a guess — a status code only means something
+    next to the code it carries.
 
-    This is public registry data (a carrier's name and address), not a
-    credential — but the body is still passed through the redaction, because a
-    response that echoed the web key must not be the thing that leaks it, and
-    the line is capped so one pathological record cannot flood a log.
+    Public registry data (a carrier's name and address), not a credential —
+    but the tax id is stripped all the same, the web key is redacted in case a
+    body ever echoed it, and the line is capped so one pathological record
+    cannot flood a log.
     """
     try:
-        text = json.dumps(payload, default=str, ensure_ascii=True)
+        text = json.dumps(_without_redacted(payload), default=str, ensure_ascii=True)
     except (TypeError, ValueError):  # a shape json cannot serialise at all
         text = repr(payload)
 
@@ -192,13 +239,11 @@ class FmcsaClient:
         *,
         client: httpx.Client | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-        clock: Callable[[], date] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._web_key = web_key
         self._timeout = timeout
         self._client = client
-        self._clock = clock or (lambda: datetime.now(timezone.utc).date())
 
     @classmethod
     def from_settings(cls, settings, **overrides) -> "FmcsaClient":
@@ -279,59 +324,63 @@ class FmcsaClient:
         legal_name = _first(carrier, _LEGAL_NAME_KEYS)
         dot_number = _first(carrier, _DOT_KEYS)
         allowed = _flag(_first(carrier, _ALLOWED_KEYS))
-        out_of_service = _flag(_first(carrier, _OUT_OF_SERVICE_KEYS))
-        status = _first(carrier, _STATUS_KEYS)
+        common_authority = _first(carrier, _COMMON_AUTHORITY_KEYS)
+        contract_authority = _first(carrier, _CONTRACT_AUTHORITY_KEYS)
+        oos_date = _first(carrier, _OOS_DATE_KEYS)
 
-        age_days = self._authority_age_days(carrier)
-
-        common = {
+        context = {
             "mc_number": mc,
-            "legal_name": str(legal_name).strip() if legal_name else None,
-            "dot_number": str(dot_number).strip() if dot_number else None,
-            "authority_age_days": age_days,
-            "raw": {k: v for k, v in carrier.items() if not isinstance(v, (dict, list))},
+            "legal_name": str(legal_name).strip() if legal_name is not None else None,
+            "dot_number": str(dot_number).strip() if dot_number is not None else None,
+            # None, always: the carrier payload carries no authority date, so
+            # there is nothing to measure an age from. Onboarding reads unknown
+            # as Review, which is the honest answer, not a guess that the
+            # authority is settled. The source is still to be found —
+            # PROGRESS.md carries it as the last open `TODO: verify`.
+            "authority_age_days": None,
+            "raw": _flat_fields(carrier),
         }
 
-        # Order follows CLAUDE.md §5: found, allowed, active, not out of service.
-        if allowed is None or out_of_service is None or status is None:
-            # The line that closes the `TODO: verify` markers: which keys the
-            # record actually carries, and what they hold. `top_level` is
-            # printed separately because it survives truncation, and the field
-            # we are missing may well be one whose name we never guessed.
+        # Order follows CLAUDE.md §5 — found, allowed, active, not out of
+        # service — with insurance appended: the first three are statements
+        # about the authority itself, and this one is a filing that lags it.
+        if allowed is None or common_authority is None or contract_authority is None:
+            # The line that settles a wrong field name: which keys the record
+            # actually carries, and what they hold. `top_level` is printed
+            # separately because it survives truncation.
             logger.warning(
                 "FMCSA payload for %s did not carry the fields we need "
-                "(allowedToOperate/outOfService/statusCode). TODO: verify key names. "
+                "(allowedToOperate/commonAuthorityStatus/contractAuthorityStatus). "
                 "top_level=%s payload=%s",
                 mc,
                 sorted(str(key) for key in carrier),
                 describe_payload(carrier, self._web_key),
             )
             return AuthorityCheck(
-                eligible=False, reason=IneligibilityReason.INCOMPLETE_RESPONSE, **common
+                eligible=False, reason=IneligibilityReason.INCOMPLETE_RESPONSE, **context
             )
 
         if not allowed:
             return AuthorityCheck(
-                eligible=False, reason=IneligibilityReason.NOT_ALLOWED_TO_OPERATE, **common
+                eligible=False, reason=IneligibilityReason.NOT_ALLOWED_TO_OPERATE, **context
             )
 
-        if str(status).strip().lower() not in _ACTIVE_STATUS:
+        if not (_active_authority(common_authority) or _active_authority(contract_authority)):
             return AuthorityCheck(
-                eligible=False, reason=IneligibilityReason.AUTHORITY_INACTIVE, **common
+                eligible=False, reason=IneligibilityReason.AUTHORITY_INACTIVE, **context
             )
 
-        if out_of_service:
+        if _has_out_of_service_order(oos_date):
             return AuthorityCheck(
-                eligible=False, reason=IneligibilityReason.OUT_OF_SERVICE, **common
+                eligible=False, reason=IneligibilityReason.OUT_OF_SERVICE, **context
             )
 
-        return AuthorityCheck(eligible=True, **common)
+        if _insurance_not_on_file(carrier):
+            return AuthorityCheck(
+                eligible=False, reason=IneligibilityReason.INSURANCE_NOT_ON_FILE, **context
+            )
 
-    def _authority_age_days(self, carrier: dict[str, Any]) -> int | None:
-        granted = _parse_date(_first(carrier, _AUTHORITY_DATE_KEYS))
-        if granted is None:
-            return None
-        return (self._clock() - granted).days
+        return AuthorityCheck(eligible=True, **context)
 
     @staticmethod
     def _unavailable(mc: str, status_code: int | None = None) -> AuthorityCheck:

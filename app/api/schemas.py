@@ -46,11 +46,21 @@ class CarrierVerifyRequest(RunRequest):
 
 
 class CarrierVerifyResponse(BaseModel):
+    """What the agent may be told about a carrier.
+
+    Deliberately four fields, and the instruction was "eligible, legal_name and
+    say". `result_code` stays because CLAUDE.md §8 makes the closed set of
+    result codes the contract the platform routes on, and the reason is in it
+    as a suffix (`fmcsa_rejected:insurance_not_on_file`).
+
+    Nothing from the FMCSA record beyond the name: no DOT number, no address,
+    no insurance detail, no tax id. The agent cannot read out what it was never
+    handed, and a field that is not here cannot end up in a transcript.
+    """
+
     eligible: bool
     result_code: str | None = None
     legal_name: str | None = None
-    dot_number: str | None = None
-    reason: str | None = None
     say: str
 
 

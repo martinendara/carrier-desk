@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 import httpx
 import pytest
-from conftest import NOW, load_fmcsa_fixture
+from conftest import ELIGIBLE_OVERRIDES, NOW, fmcsa_payload
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -30,13 +30,13 @@ KNOWN_MC = "123456"
 UNKNOWN_MC = "999999"
 
 
-def fmcsa_returning(fixture: str) -> FmcsaClient:
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json=load_fmcsa_fixture(fixture))
-    )
-    return FmcsaClient(
-        "https://fmcsa.test", "key", client=httpx.Client(transport=transport), clock=lambda: NOW.date()
-    )
+def fmcsa_returning(payload: dict) -> FmcsaClient:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    return FmcsaClient("https://fmcsa.test", "key", client=httpx.Client(transport=transport))
+
+
+#: The recorded carrier with its authority in force and its insurance filed.
+BOOKABLE = fmcsa_payload(**ELIGIBLE_OVERRIDES)
 
 
 @contextmanager
@@ -57,7 +57,7 @@ def api_app(**overrides):
     container = app.state.container
     # FMCSA blocks Argentina, so the real client cannot be used here. Swapping
     # it is the only seam these tests need.
-    container.fmcsa = fmcsa_returning("carrier_eligible")
+    container.fmcsa = fmcsa_returning(BOOKABLE)
     client = TestClient(app)
     try:
         yield client, container
@@ -310,14 +310,16 @@ def test_an_eligible_carrier(api):
     body = verify_carrier(client, "run-1")
 
     assert body["eligible"] is True
-    assert body["legal_name"] == "RIDGELINE FREIGHT LLC"
+    assert body["legal_name"] == "B MARRON LOGISTICS LLC"
     assert body["result_code"] is None
     assert body["say"]
 
 
 def test_a_rejected_carrier_carries_the_reason_code_not_the_detail(api):
     client, container = api
-    container.fmcsa = fmcsa_returning("carrier_out_of_service")
+    container.fmcsa = fmcsa_returning(
+        fmcsa_payload(**ELIGIBLE_OVERRIDES, oosDate="20260115")
+    )
 
     response = client.post(
         "/carriers/verify", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS

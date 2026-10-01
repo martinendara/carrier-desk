@@ -38,6 +38,10 @@ CARRIER_NOT_FOUND = "I couldn't find that MC number in the FMCSA records."
 CARRIER_NOT_ALLOWED = "That authority isn't allowed to operate right now."
 CARRIER_INACTIVE = "That authority isn't active right now."
 CARRIER_OUT_OF_SERVICE = "That carrier is showing as out of service right now."
+CARRIER_INSURANCE = (
+    "The insurance we need isn't showing as filed on your record. "
+    "Let me have someone look into it."
+)
 CARRIER_UNVERIFIED = "I can't verify your authority right now. Let me have someone call you back."
 
 # --- OTP ----------------------------------------------------------------

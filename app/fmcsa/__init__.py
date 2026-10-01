@@ -1,4 +1,4 @@
-"""FMCSA authority check. Fails closed; every field name is TODO: verify."""
+"""FMCSA authority check. Fails closed; field names recorded from the live API."""
 
 from app.fmcsa.client import FmcsaClient, McValidationError, validate_mc
 from app.fmcsa.models import AuthorityCheck, IneligibilityReason
