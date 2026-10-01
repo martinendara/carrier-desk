@@ -42,10 +42,18 @@ logger = logging.getLogger(__name__)
 class ApiError(Exception):
     """A failure we have already decided how to describe."""
 
-    def __init__(self, status_code: int, code: str, say: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        say: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.code = code
         self.say = say
+        #: Extra response headers, e.g. `Retry-After` on a 429.
+        self.headers = headers or {}
         super().__init__(code)
 
 
@@ -121,7 +129,9 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
         logger.info("api error %s on %s", exc.code, request.url.path)
         return JSONResponse(
-            status_code=exc.status_code, content={"error": exc.code, "say": exc.say}
+            status_code=exc.status_code,
+            content={"error": exc.code, "say": exc.say},
+            headers=exc.headers,
         )
 
     def make_handler(name: str):

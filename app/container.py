@@ -18,6 +18,7 @@ from app.fmcsa import FmcsaClient
 from app.handoff import HandoffQueue
 from app.negotiation import NegotiationEngine
 from app.otp import OtpService
+from app.rate_limit import SlidingWindowLimiter
 from app.sessions import RunSessionStore
 from app.tms.client import TmsClient
 from app.tms.fake_server import FakeTms, start_fake_tms
@@ -26,6 +27,22 @@ logger = logging.getLogger(__name__)
 
 #: Sentinel for `EVENTS_JSONL_PATH` meaning "keep events in memory".
 MEMORY_SINK = "memory"
+
+SECONDS_PER_HOUR = 3600.0
+
+
+def _refuse_fake_in_production(settings: Settings) -> None:
+    """`TMS_MODE=fake` serves recorded fixtures. Shipping that is not a bug you
+    notice later — it is a real carrier being quoted a load that does not exist.
+
+    Refusing at startup turns a silent misconfiguration into a container that
+    will not come up, which is the failure everyone notices.
+    """
+    if settings.is_production and settings.tms_mode.strip().lower() == "fake":
+        raise ConfigurationError(
+            "TMS_MODE=fake serves recorded fixtures and must not run with "
+            "ENV=production. Set TMS_MODE=live, or unset ENV."
+        )
 
 
 def build_event_sink(settings: Settings) -> EventSink:
@@ -37,6 +54,10 @@ def build_event_sink(settings: Settings) -> EventSink:
     if not path.is_absolute():
         path = REPO_ROOT / path
     return JsonlEventSink(path)
+
+
+class ConfigurationError(RuntimeError):
+    """The configuration is internally consistent but dangerous. Refuse to start."""
 
 
 @dataclass
@@ -51,11 +72,14 @@ class Container:
     negotiation: NegotiationEngine
     fmcsa: FmcsaClient
     handoffs: HandoffQueue
+    otp_verify_limiter: SlidingWindowLimiter
     #: Set when TMS_MODE=fake. We own it and must stop it on the way out.
     fake_tms: FakeTms | None = None
 
     @classmethod
     def build(cls, settings: Settings) -> "Container":
+        _refuse_fake_in_production(settings)
+
         store = RunSessionStore(ttl_seconds=settings.run_session_ttl_seconds)
         sink = build_event_sink(settings)
 
@@ -88,6 +112,10 @@ class Container:
                 settings, timeout=settings.fmcsa_timeout_seconds
             ),
             handoffs=HandoffQueue(),
+            otp_verify_limiter=SlidingWindowLimiter(
+                limit=settings.otp_verify_rate_limit_per_hour,
+                window_seconds=SECONDS_PER_HOUR,
+            ),
             fake_tms=fake,
         )
 

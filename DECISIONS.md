@@ -686,3 +686,90 @@ the server's own startup.
 
 **Why.** The tests import `create_app`; so does anyone debugging. A module that cannot be
 imported without a fully configured environment is a module that is hard to debug.
+
+---
+
+# Phase 4 — hardening and deployment
+
+---
+
+## 38. Rate limiting sits above the per-call lock, keyed by MC
+
+**Problem.** The OTP lock is three attempts *per call*. A caller who opens a new call — a
+new `run_id`, which costs nothing — gets three more. Six digits is a million
+possibilities, but the lock was never the thing standing between a patient caller and the
+code; the *rate* was, and nothing bounded it.
+
+**Choice.** A sliding-window limiter on `/otp/verify`, five attempts per hour per MC,
+counted across every call. The key is the MC once one is bound to the session, and the run
+id before that, so an unstarted call is not free to probe either.
+
+**Rejected.** Keying by `run_id` (defeated by the same trick it exists to stop), and
+counting only *failed* attempts (which would leave a successful guess uncounted on a path
+where the guess is the whole attack).
+
+**Why.** A blocked attempt is not recorded, so hammering the endpoint does not extend the
+caller's own ban — the window closes on schedule. And a correct code costs an attempt too,
+because the limit is about how many times anyone may knock, not about how many times they
+were wrong.
+
+---
+
+## 39. `TMS_MODE=fake` refuses to start with `ENV=production`
+
+**Problem.** `TMS_MODE=fake` is a development switch with no guard. Set in a deployment, it
+serves recorded fixture loads to real carriers: a real conversation, a real negotiation, a
+real booking attempt, against freight that does not exist. Nothing about it looks broken
+from the outside.
+
+**Choice.** `Container.build` raises `ConfigurationError` when `is_production` and the mode
+is `fake`. The container exits 1 and the platform reports a failed deploy.
+
+**Rejected.** A log warning (nobody reads it during a deploy), and removing the switch
+entirely (the platform's workflow tests genuinely need it).
+
+**Why.** A misconfiguration that is silently plausible is worse than a crash. Failing at
+startup turns "we quoted a carrier a load that does not exist" into "the deploy is red",
+which is the failure everyone notices.
+
+---
+
+## 40. The image reads `PORT`, runs as a non-root user, and is pinned to one replica
+
+**Problem.** Three deployment defaults that each turn into a confusing outage: a hardcoded
+port behind a platform that injects its own (the service starts and is never reachable —
+looks like a hang, not a config error); running as root (unnecessary blast radius); and
+scaling out (which silently breaks every in-memory thing in this service).
+
+**Choice.** `CMD ["sh", "-c", "exec uvicorn ... --port ${PORT:-8000}"]` with the healthcheck
+reading the same variable; a `appuser` uid 10001; and `deploy.replicas: 1` in compose with
+the reason written next to it.
+
+**Rejected.** Hardcoding 8000 and documenting "set the target port" — a foot-gun whose
+symptom is indistinguishable from a broken service. Also rejected: `VOLUME` in the
+Dockerfile, which would create an anonymous volume nobody can find; the compose file
+declares a named one instead.
+
+**Why.** The `exec` matters too: without it uvicorn is not PID 1 and a shutdown signal goes
+to the shell, so the container is killed rather than stopped, mid-call.
+
+---
+
+## 41. Railway over Render, because the free tier that sleeps cannot answer a phone
+
+**Problem.** The service must run in a US region, and the obvious move is the free tier of
+whichever host.
+
+**Choice.** Railway. Its services do not spin down when idle — they run and bill, or they
+are deleted. Render's free web tier sleeps after 15 minutes without traffic and pays a
+~20–60 s cold start.
+
+**Rejected.** Render free plus a keep-alive cron, which is the usual workaround and is not
+something to build a phone line on: the first tool call of a call would hang through the
+cold start, and a carrier does not wait 40 seconds.
+
+**Why.** For a voice agent the cold start is not a latency cost, it is a failed call — and
+it fails in a way that looks like a broken integration rather than a sleeping host. The
+honest trade is continuous billing on Railway rather than a free tier that cannot answer.
+
+---

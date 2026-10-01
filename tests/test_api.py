@@ -48,6 +48,9 @@ def api_app(**overrides):
         "otp_hmac_secret": SECRET,
         "events_jsonl_path": "memory",
         "request_budget_seconds": 5.0,
+        # High by default so the limiter does not interfere with unrelated
+        # tests; the tests that are about it set their own.
+        "otp_verify_rate_limit_per_hour": 1000,
     }
     options.update(overrides)
     app = create_app(Settings(**options))
@@ -826,3 +829,131 @@ def test_a_search_that_finds_nothing_is_still_recorded(api):
     (event,) = container.sink.of_type(EventType.SEARCH_PERFORMED)
 
     assert event.payload["results"] == 0
+
+
+# --- OTP rate limiting --------------------------------------------------
+
+
+def _wrong_code_attempt(client, run_id: str, mc: str = KNOWN_MC):
+    """One send plus one deliberately wrong verify, for a fresh call."""
+    client.post("/otp/send", json={"run_id": run_id, "mc_number": mc}, headers=HEADERS)
+    return client.post(
+        "/otp/verify", json={"run_id": run_id, "code": "000000"}, headers=HEADERS
+    )
+
+
+def test_verify_is_rate_limited_per_mc_across_calls():
+    """Five attempts an hour for one MC, no matter how many calls are started."""
+    with api_app(otp_verify_rate_limit_per_hour=5) as (client, _):
+        for index in range(5):
+            response = _wrong_code_attempt(client, f"call-{index}")
+            assert response.status_code == 200, f"attempt {index} was refused early"
+
+        blocked = _wrong_code_attempt(client, "call-5")
+
+    assert blocked.status_code == 429
+    assert blocked.json()["error"] == "otp_rate_limited"
+
+
+def test_a_rate_limited_response_says_when_to_come_back():
+    with api_app(otp_verify_rate_limit_per_hour=1) as (client, _):
+        _wrong_code_attempt(client, "call-0")
+
+        blocked = _wrong_code_attempt(client, "call-1")
+
+    assert blocked.status_code == 429
+    retry_after = int(blocked.headers["Retry-After"])
+    assert 0 < retry_after <= 3600
+
+
+def test_the_limit_is_per_mc_not_global():
+    with api_app(otp_verify_rate_limit_per_hour=1) as (client, _):
+        assert _wrong_code_attempt(client, "call-a", "123456").status_code == 200
+        assert _wrong_code_attempt(client, "call-b", "123456").status_code == 429
+        # A different carrier is unaffected by the first one's attempts.
+        assert _wrong_code_attempt(client, "call-c", "778899").status_code == 200
+
+
+def test_the_rate_limited_line_is_speakable():
+    with api_app(otp_verify_rate_limit_per_hour=1) as (client, _):
+        _wrong_code_attempt(client, "call-0")
+
+        body = _wrong_code_attempt(client, "call-1").json()
+
+    assert body["say"]
+    for leak in ("429", "rate", "limit", "Redis", "mc:", "call-"):
+        assert leak.lower() not in body["say"].lower()
+
+
+def test_a_correct_code_still_costs_an_attempt():
+    """Otherwise the limit would only count failures, and guessing is not the
+    only thing worth bounding."""
+    with api_app(otp_verify_rate_limit_per_hour=2) as (client, _):
+        become_verified(client, "call-0")
+        become_verified(client, "call-1")
+
+        blocked = _wrong_code_attempt(client, "call-2")
+
+    assert blocked.status_code == 429
+
+
+# --- the production guard -----------------------------------------------
+
+
+def test_fake_tms_is_refused_in_production():
+    """Shipping fixture loads to real carriers is not a bug you notice later."""
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="production",
+                tms_mode="fake",
+                service_api_key=API_KEY,
+                otp_hmac_secret=SECRET,
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "TMS_MODE=fake" in str(caught.value)
+
+
+@pytest.mark.parametrize("env_name", ["production", "prod", "PRODUCTION", " production "])
+def test_the_guard_is_case_and_space_insensitive(env_name):
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError):
+        create_app(
+            Settings(
+                env=env_name,
+                tms_mode="fake",
+                service_api_key=API_KEY,
+                otp_hmac_secret=SECRET,
+                events_jsonl_path="memory",
+            )
+        )
+
+
+def test_fake_tms_is_fine_in_development():
+    with api_app(env="development", tms_mode="fake") as (client, _):
+        assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_live_tms_is_fine_in_production():
+    """The guard is about the fake, not about production."""
+    settings = Settings(
+        env="production",
+        tms_mode="live",
+        tms_host="tms.example.test",
+        tms_port=1234,
+        tms_token="not-a-real-token",
+        service_api_key=API_KEY,
+        otp_hmac_secret=SECRET,
+        events_jsonl_path="memory",
+    )
+    app = create_app(settings)
+    try:
+        assert app.state.container.settings.is_production
+        assert app.state.container.fake_tms is None
+    finally:
+        app.state.container.close()

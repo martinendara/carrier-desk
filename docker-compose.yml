@@ -1,0 +1,37 @@
+services:
+  carrier-desk:
+    build: .
+    image: carrier-desk:latest
+    # Configuration comes from .env, which is gitignored.
+    env_file: .env
+    environment:
+      # Never forced here, so a local `docker compose up` with TMS_MODE=fake
+      # still runs. The deployed host sets ENV=production, and that combination
+      # refuses to start with a fake TMS (app/container.py).
+      ENV: ${ENV:-development}
+      EVENTS_JSONL_PATH: /data/events.jsonl
+    ports:
+      - "8000:8000"
+    volumes:
+      - carrier-desk-events:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      # One replica is a correctness requirement, not a preference: run
+      # sessions, the negotiation counters and the OTP limiter all live in
+      # process memory, so a second replica would keep half the state and a call
+      # that landed on the wrong one would look like a call that never started.
+      # Redis behind the same interfaces is the path to more than one.
+      replicas: 1
+
+volumes:
+  carrier-desk-events:

@@ -319,3 +319,82 @@ New in phase 3:
 ### Not started
 
 Phase 4: Docker, docker-compose, deployment to a US region, live FMCSA verification.
+
+---
+
+## Phase 4 — hardening and deployment (2026-10-01)
+
+**Status:** complete. Built, run and verified locally in Docker. **Not deployed** — that
+needs your account.
+
+### What was built
+
+| Item | Where |
+|---|---|
+| OTP rate limit, 5/hour per MC across calls | `app/rate_limit.py`, applied in `app/api/routes/otp.py` |
+| Startup guard: `ENV=production` + `TMS_MODE=fake` refuses to boot | `app/container.py` |
+| `Dockerfile` — non-root, `PORT`-aware, healthcheck | repo root |
+| `docker-compose.yml` — one replica, named volume for the event log | repo root |
+| `.dockerignore` — `.env` never enters the build context | repo root |
+| Deploy runbook | `docs/DEPLOY.md` |
+
+### Tests
+
+```
+424 passed in 5.73s
+```
+
+`tests/test_rate_limit.py` adds 15 for the limiter; `tests/test_api.py` grew by 14:
+the limit holding across calls and run ids, `Retry-After` being present and sane, a
+different MC being unaffected, the blocked line not leaking its mechanism, a *correct*
+code still costing an attempt, and the production guard accepting `production`/`prod` in
+any case while leaving `live` + production alone.
+
+### Verified in Docker
+
+- `docker build` succeeds; the image is non-root (`uid=10001(appuser)`) and contains no
+  `.env` (`ls -a /app | grep .env` → 0).
+- `docker compose up` reaches `healthy` and serves a **full call** through the container:
+  verify → OTP send → verify → search (3 loads, no `MAX_BUY`) → open at 5125 → counter →
+  accept at 5125 → `booked` with a reference → handoff ticket.
+- The event log lands on the named volume (`/data/events.jsonl`).
+- `ENV=production TMS_MODE=fake` → `ConfigurationError`, container exit code **1**.
+- `PORT=9111` is honoured, and the healthcheck follows it (`healthy`).
+
+### The sleep question
+
+Answered in `docs/DEPLOY.md`. **Railway does not sleep idle services** — they run and bill
+continuously, with a ~$1/month recurring credit on the free plan, so ~$5/month Hobby is the
+practical minimum. **Render's free web tier sleeps after 15 minutes** of no traffic with a
+~20–60 s cold start, which for a voice agent is not a latency cost but a failed call. That
+ruled Render out. Sources are linked in the doc.
+
+### Open issues
+
+Carried over:
+
+1. **TMS token rejected** — no live load has ever been fetched.
+2. **Every FMCSA field name is `TODO: verify`**; fixtures are synthetic.
+3. **FMCSA has never been called successfully** from here. A US deploy is what closes this,
+   and `docs/DEPLOY.md` describes the exact call that does it.
+4. **OTP delivery is not wired to the platform yet.**
+5. **Sessions, the handoff queue and now the rate limiter are all process-local**, which is
+   why `docs/DEPLOY.md` pins one replica. Redis behind the same interfaces is the path to
+   more.
+6. **A restart loses in-flight calls and the handoff queue.** The `handoff_created` event
+   on the volume is the durable record.
+
+New in phase 4:
+
+7. **The rate limiter is per process**, so a second replica would double the effective
+   limit. It pairs with the one-replica constraint rather than standing alone.
+8. **`SERVICE_API_KEY` empty in production does not fail startup** — it starts and then
+   answers 503 to everything. The fake-TMS guard is the only startup guard; this one is a
+   candidate for the same treatment.
+9. **No CI.** Nothing runs the suite on push; it is green because it was run here.
+10. **The deploy is documented, not executed.** The one-command path and the required
+    variables are untested against the platform's own behaviour.
+
+### Done
+
+All four phases of CLAUDE.md §10.

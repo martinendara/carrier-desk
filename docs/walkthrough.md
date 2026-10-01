@@ -531,3 +531,63 @@ fixture only captured as `LOAD_QUERY` lines, including a `MAX_BUY` above the pos
 Without that you could search and not negotiate, which is the only thing the fake is for.
 The invented fields are labelled as such in the module — nothing about them claims to match
 the live server.
+
+---
+
+# Phase 4 — hardening and deployment
+
+---
+
+## 30. `app/rate_limit.py` — the limit above the per-call lock
+
+The OTP lock in `app/otp/service.py` is three attempts **per call**. Opening a new call gets
+three more, and a call is free, so the lock was never what stood between a patient caller
+and the code. This is the thing that does: a sliding window of five attempts per hour, keyed
+by MC once one is bound to the session and by run id before that.
+
+Two decisions in it are worth reading before changing it:
+
+- A **blocked attempt is not recorded**, so hammering the endpoint does not keep pushing the
+  caller's own ban out. The window closes on schedule regardless.
+- A **correct code still costs an attempt**. The limit is about how many times anyone may
+  knock, not how many times they were wrong.
+
+The dictionary of keys is capped, because a caller looping over fake MC numbers is otherwise
+a slow way to run the service out of memory.
+
+---
+
+## 31. `app/container.py` — the startup guard
+
+`Container.build` refuses to construct when `ENV=production` and `TMS_MODE=fake`. A
+fixture-serving deployment does not look broken from the outside: real conversation, real
+negotiation, real booking attempt, against freight that does not exist. Failing at startup
+turns that into a red deploy, which is the failure everyone notices.
+
+The guard is on `is_production`, which accepts `production`/`prod` in any case, and it is
+the *only* startup guard — an empty `SERVICE_API_KEY` still starts and answers 503, which
+`PROGRESS.md` lists as a candidate for the same treatment.
+
+---
+
+## 32. Dockerfile, compose and the one-replica constraint
+
+The image reads `PORT` (falling back to 8000) rather than hardcoding it, because a platform
+that injects its own port would leave a service that starts and is never reachable — a
+symptom that reads as a hang rather than a misconfiguration. The healthcheck reads the same
+variable. `exec` in front of uvicorn so it is PID 1 and gets the shutdown signal, rather
+than the shell getting it and the container being killed mid-call.
+
+It runs as `appuser` (uid 10001), and `.env` is in `.dockerignore`, so configuration can
+only arrive through the environment at run time.
+
+`docker-compose.yml` pins **one replica**, with the reason written next to it. Run sessions,
+the negotiation counters, the OTP limiter and the handoff queue are all process memory: a
+second replica would hold half the state, and a tool call that landed on the wrong one would
+look like a call that had never started. That is a correctness requirement, and it is in the
+runbook so nobody "fixes" it during a traffic spike.
+
+`docs/DEPLOY.md` is the runbook: the one command, the variables to set on the host (never
+the ones from a developer's `.env`), and the two post-deploy checks — the second of which,
+a real `/carriers/verify` from a US region, is the first time the FMCSA parser meets a real
+response.

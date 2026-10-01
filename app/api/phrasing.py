@@ -51,6 +51,9 @@ OTP_RESEND_LIMIT = "I've already sent that again. Let me get a rep to help you."
 OTP_ALREADY_VERIFIED = "You're already verified on this call."
 OTP_LOCKED = "That code has been entered too many times. Let me get a rep to help you."
 OTP_VERIFIED = "Thanks, that's confirmed."
+OTP_RATE_LIMITED = (
+    "That's too many code attempts on this carrier for now. Let me get a rep to help you."
+)
 OTP_WRONG = "That code doesn't match. You have {attempts_left} tries left."
 OTP_EXPIRED = "That code has expired. I'll send you a new one."
 

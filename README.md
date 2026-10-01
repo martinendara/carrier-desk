@@ -244,6 +244,27 @@ gitignored and never committed.
 | `REQUEST_BUDGET_SECONDS` | wall-clock ceiling per HTTP request, retries included (default 8) |
 | `EVENTS_JSONL_PATH` | event log location; `memory` keeps it in-process |
 | `SERVICE_API_KEY` | the `X-API-Key` the platform sends |
+| `OTP_VERIFY_RATE_LIMIT_PER_HOUR` | attempts per MC per hour, across calls (default 5) |
+| `ENV` | `production` arms the startup guard that refuses `TMS_MODE=fake` |
+
+## Deployment
+
+The service must run in a **US region** — FMCSA returns 403 to the whole domain from
+anywhere else, so the carrier check fails closed and every call is routed to a human.
+
+```bash
+railway login && railway init && railway up   # one-time setup, then `railway up` to ship
+```
+
+**One replica.** Run sessions, round counters and the OTP limiter are process-local, so a
+second replica would keep half the state and make calls look like they never started.
+
+**The free plan that sleeps is the wrong one.** Railway does not spin down idle services;
+Render's free web tier sleeps after 15 minutes of no traffic and pays a ~20–60 s cold
+start on the next request — fatal for a voice agent, where the call is over before the
+service finishes booting.
+
+Full runbook, required variables and post-deploy checks: [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Where to read more
 
@@ -253,6 +274,8 @@ gitignored and never committed.
   request flows through it.
 - [`DECISIONS.md`](DECISIONS.md) — every non-obvious choice: problem, choice, rejected
   alternative, why.
+- [`docs/DEPLOY.md`](docs/DEPLOY.md) — Docker, the one-command deploy, and the free-tier
+  sleep question.
 - [`PROGRESS.md`](PROGRESS.md) — the checkpoint log, including what is still open.
 
 ## Known open items

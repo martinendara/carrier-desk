@@ -13,10 +13,11 @@ conversation context. Nothing in the agent-facing fields repeats it.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 
 from app.api import phrasing
 from app.api.deps import get_container
+from app.api.errors import ApiError
 from app.api.schemas import (
     OtpDelivery,
     OtpSendRequest,
@@ -35,6 +36,16 @@ _SAY_BY_STATUS = {
     DispatchStatus.ALREADY_VERIFIED: phrasing.OTP_ALREADY_VERIFIED,
     DispatchStatus.LOCKED: phrasing.OTP_LOCKED,
 }
+
+
+def _rate_limit_key(session, run_id: str) -> str:
+    """Bucket attempts by MC, so a new `run_id` does not reset the count.
+
+    Falling back to the run id when no MC is bound yet keeps an unstarted call
+    from being free to probe.
+    """
+    mc_number = getattr(session, "mc_number", None)
+    return f"mc:{mc_number}" if mc_number else f"run:{run_id}"
 
 
 @router.post("/otp/send", response_model=OtpSendResponse)
@@ -65,7 +76,23 @@ def verify_otp(
     payload: OtpVerifyRequest,
     container: Container = Depends(get_container),
 ) -> OtpVerifyResponse:
-    """Check the code. Every attempt counts, valid-looking or not."""
+    """Check the code. Every attempt counts, valid-looking or not.
+
+    Rate limited **per MC, across calls**. The per-call lock is three attempts;
+    without this, opening a new call buys three more, and six digits is small
+    enough that a patient caller would eventually find them.
+    """
+    session = container.store.get(payload.run_id)
+    key = _rate_limit_key(session, payload.run_id)
+    decision = container.otp_verify_limiter.hit(key)
+    if not decision.allowed:
+        raise ApiError(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "otp_rate_limited",
+            phrasing.OTP_RATE_LIMITED,
+            headers={"Retry-After": str(decision.retry_after)},
+        )
+
     verification = container.otp.verify(payload.run_id, payload.code)
 
     if verification.verified:

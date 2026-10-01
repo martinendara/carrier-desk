@@ -1,0 +1,20 @@
+# Never in the build context. The image gets its configuration from the
+# environment at run time; a .env baked into a layer would be readable by anyone
+# who can pull the image.
+.env
+
+.git
+.gitignore
+.venv
+.claude
+.pytest_cache
+__pycache__/
+*.pyc
+var/
+docs/
+tests/
+!tests/fixtures
+
+Dockerfile
+docker-compose.yml
+.dockerignore

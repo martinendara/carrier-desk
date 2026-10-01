@@ -33,11 +33,16 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    #: `development` or `production`. Only production turns on the startup
+    #: guards; nothing else keys off it.
+    env: str = "development"
+
     # --- Legacy TMS -----------------------------------------------------
     #: `live` talks to TMS_HOST; `fake` starts the in-process server from
     #: app/tms/fake_server.py, seeded from the recorded fixtures. Development
     #: only: the platform's workflow tests fire real webhooks, and they must be
-    #: able to run a whole call without spending live loads.
+    #: able to run a whole call without spending live loads. Combining it with
+    #: `env=production` refuses to start.
     tms_mode: str = "live"
     tms_host: str = ""
     tms_port: int = 0
@@ -68,6 +73,9 @@ class Settings(BaseSettings):
     otp_ttl_seconds: int = 300
     otp_max_attempts: int = 3
     otp_max_resends: int = 1
+    #: Attempts allowed per MC per hour, across every call. The per-call lock is
+    #: three; without this, a new run_id buys three more.
+    otp_verify_rate_limit_per_hour: int = 5
 
     # --- Negotiation (phase 2) ------------------------------------------
     negotiation_steps: str = "0.40,0.75"
@@ -86,6 +94,10 @@ class Settings(BaseSettings):
     #: repository root. The literal "memory" keeps events in the process, which
     #: is what the tests use.
     events_jsonl_path: str = "var/events.jsonl"
+
+    @property
+    def is_production(self) -> bool:
+        return self.env.strip().lower() in {"production", "prod"}
 
     @property
     def tms_token_value(self) -> str:
