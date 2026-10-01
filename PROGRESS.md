@@ -543,6 +543,30 @@ was the carrier record, because that is what our own parser had already stripped
 
 **438 passed** (5 new tests).
 
+### Verified against the deploy
+
+`POST /carriers/verify` with MC 123456 against the Render instance, after it picked
+up the commit:
+
+```json
+{"eligible": false, "result_code": "fmcsa_rejected:authority_inactive",
+ "legal_name": "B MARRON LOGISTICS LLC",
+ "say": "That authority isn't active right now."}
+```
+
+Which is the whole point of the exercise: **refused for its authority, not for
+`incomplete_response`.** Four fields, as intended — no DOT number, no reason code, no
+insurance, no address. Eighteen consecutive calls, all identical.
+
+The first call took 22.7 s (the free tier's cold start), the rest 0.3–0.7 s. That
+confirms the shape of the earlier anomaly too: a sleeping instance pays the cost on the
+first call, and the 500s seen before it was warm are still unexplained but are not the
+steady state.
+
+`insurance_not_on_file` is not reachable with this MC — the authority check comes first
+and this carrier fails it — so that reason is verified by tests against the recorded
+payload and not yet by a live carrier that has authority but no filing on record.
+
 ### Open issues
 
 Updated:
