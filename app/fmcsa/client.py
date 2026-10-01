@@ -40,6 +40,11 @@ _MC_RE = re.compile(r"^\d{1,8}$")
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
+#: The authority record is enrichment on a call the carrier is already on, so
+#: it gets a shorter leash than the lookup the verdict depends on: a slow
+#: second opinion is not worth a pause in the conversation.
+AUTHORITY_TIMEOUT_SECONDS = 2.0
+
 #: How much of a payload goes on one log line. Long enough for a real carrier
 #: record with its nested lists, short enough that a log viewer stays readable.
 PAYLOAD_LOG_LIMIT = 2000
@@ -277,30 +282,83 @@ class FmcsaClient:
             logger.warning("FMCSA lookup for %s failed: %s", mc, type(exc).__name__)
             return self._unavailable(mc)
 
-        return self._interpret(mc, payload)
+        check = self._interpret(mc, payload)
+
+        if check.authority_active and check.dot_number:
+            self.authority_record(check.dot_number)
+
+        return check
 
     # --- transport ------------------------------------------------------
 
-    def _fetch(self, mc: str) -> Any:
-        url = f"{self._base_url}/carriers/docket-number/{mc}"
+    def _get(self, path: str, *, timeout: float | None = None) -> Any:
+        """One GET against FMCSA, web key attached. Raises on anything but 2xx.
+
+        A 404 raises here rather than being handled: which of the callers wants
+        to read a missing record as an answer and which as a failure is their
+        decision, not this one's.
+        """
+        url = f"{self._base_url}{path}"
         headers = {"Accept": "application/json"}
+        params = {"webKey": self._web_key}
+        timeout = self._timeout if timeout is None else timeout
 
         if self._client is not None:
-            response = self._client.get(
-                url, params={"webKey": self._web_key}, headers=headers, timeout=self._timeout
-            )
+            response = self._client.get(url, params=params, headers=headers, timeout=timeout)
         else:
-            with httpx.Client(timeout=self._timeout) as client:
-                response = client.get(
-                    url, params={"webKey": self._web_key}, headers=headers
-                )
+            with httpx.Client(timeout=timeout) as client:
+                response = client.get(url, params=params, headers=headers)
 
-        if response.status_code == 404:
-            raise httpx.HTTPStatusError(
-                "carrier not found", request=response.request, response=response
-            )
         response.raise_for_status()
         return response.json()
+
+    def _fetch(self, mc: str) -> Any:
+        # A 404 here means FMCSA does not know the MC, which `check()` reads as
+        # an answer rather than an outage.
+        return self._get(f"/carriers/docket-number/{mc}")
+
+    def authority_record(self, dot_number: str) -> Any | None:
+        """Fetch a carrier's own authority record and log it.
+
+        **Reconnaissance.** `authority_age_days` needs the date the authority
+        was granted, and the carrier payload has none — the last open
+        `TODO: verify`. This endpoint is the candidate source, and its field
+        names are as unverified as the carrier payload's were. So it is read
+        the same way out of it: print the record once, from a region that can
+        reach FMCSA, and take the names off it.
+
+        Nothing parses the result yet, and nothing may fail because of it: the
+        call is bounded, a failure is swallowed and logged, and the verdict the
+        carrier is waiting on is already decided by the time this runs. Once a
+        date is parsed out of here it becomes the source of the age, and this
+        line can be deleted.
+        """
+        try:
+            record = self._get(
+                f"/carriers/{dot_number}/authority", timeout=AUTHORITY_TIMEOUT_SECONDS
+            )
+        except httpx.HTTPStatusError as exc:
+            # 404 is the interesting one: it is what a wrong path looks like.
+            logger.warning(
+                "FMCSA authority lookup for DOT %s answered %s. "
+                "TODO: verify the path and the field names.",
+                dot_number,
+                exc.response.status_code,
+            )
+            return None
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(
+                "FMCSA authority lookup for DOT %s failed: %s", dot_number, type(exc).__name__
+            )
+            return None
+
+        logger.warning(
+            "FMCSA authority record for DOT %s. TODO: verify the field names, then parse "
+            "the grant date into authority_age_days. payload=%s",
+            dot_number,
+            describe_payload(record, self._web_key),
+        )
+        return record
 
     # --- interpretation -------------------------------------------------
 
@@ -369,6 +427,12 @@ class FmcsaClient:
             return AuthorityCheck(
                 eligible=False, reason=IneligibilityReason.AUTHORITY_INACTIVE, **context
             )
+
+        # Past here the carrier holds an authority. Everything below is about
+        # whether it may be used, and `check()` reads this flag to decide
+        # whether a second lookup — the authority's own record — is worth the
+        # round trip.
+        context["authority_active"] = True
 
         if _has_out_of_service_order(oos_date):
             return AuthorityCheck(

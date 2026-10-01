@@ -56,6 +56,28 @@ def recorded_carrier(**overrides) -> dict:
     return fmcsa_payload(**{**ELIGIBLE_OVERRIDES, **overrides})
 
 
+def routing_client(routes: dict[str, object], calls: list[str]) -> FmcsaClient:
+    """A client that answers per path, and records what was asked for.
+
+    `routes` maps a fragment of the URL to a payload or to a whole response.
+    The carrier lookup and the authority lookup are different endpoints, so a
+    client that answers both the same way cannot tell one from the other.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        calls.append(url.split("?")[0])
+        for fragment, reply in routes.items():
+            if fragment in url:
+                if isinstance(reply, httpx.Response):
+                    return reply
+                return httpx.Response(200, json=reply)
+        return httpx.Response(404, json={})
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    return FmcsaClient("https://mobile.fmcsa.dot.gov/qc/services", "test-key", client=http)
+
+
 # --- MC validation ------------------------------------------------------
 
 
@@ -114,7 +136,9 @@ def test_the_request_carries_the_mc_and_the_key():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
-        return httpx.Response(200, json=recorded_carrier())
+        # The recorded carrier has no active authority, so this is the only
+        # request the check makes and `seen` cannot be overwritten.
+        return httpx.Response(200, json=load_fmcsa_fixture("carrier_recorded"))
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
     FmcsaClient("https://mobile.fmcsa.dot.gov/qc/services", "secret-key", client=http).check(
@@ -284,6 +308,95 @@ def test_a_non_json_body_fails_closed():
     assert check.reason is IneligibilityReason.VERIFICATION_UNAVAILABLE
 
 
+# --- the authority record -----------------------------------------------
+#
+# The last open `TODO: verify`: the carrier payload has no authority date, so
+# the age comes from this second endpoint — whose field names are as unverified
+# as the carrier payload's were. Same way out: log the record and read it.
+
+
+def test_the_authority_record_is_fetched_once_the_authority_is_active(caplog):
+    calls: list[str] = []
+    client = routing_client(
+        {
+            "docket-number": recorded_carrier(),
+            "/authority": {"content": [{"carrierAuthority": {"originalActionDate": "2019-04-11"}}]},
+        },
+        calls,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        check = client.check("123456")
+
+    assert check.eligible
+    assert check.authority_active
+    assert calls[-1].endswith("/carriers/3177404/authority")
+    # Keys and values, so tomorrow's parsing is a transcription and not a guess.
+    assert "originalActionDate" in caplog.text
+    assert "2019-04-11" in caplog.text
+
+
+def test_the_authority_record_is_not_fetched_when_the_authority_is_inactive():
+    """No authority means no date worth a round trip, and none is spent."""
+    calls: list[str] = []
+    client = routing_client({"docket-number": load_fmcsa_fixture("carrier_recorded")}, calls)
+
+    check = client.check("123456")
+
+    assert check.reason is IneligibilityReason.AUTHORITY_INACTIVE
+    assert not check.authority_active
+    assert calls == ["https://mobile.fmcsa.dot.gov/qc/services/carriers/docket-number/123456"]
+
+
+def test_the_authority_record_is_not_fetched_when_the_dot_number_is_missing():
+    calls: list[str] = []
+    payload = recorded_carrier()
+    del payload["content"][0]["carrier"]["dotNumber"]
+    client = routing_client({"docket-number": payload}, calls)
+
+    check = client.check("123456")
+
+    assert check.eligible
+    assert check.dot_number is None
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("reply", [httpx.Response(404), httpx.Response(500)])
+def test_a_failed_authority_lookup_does_not_change_the_verdict(reply, caplog):
+    """It is enrichment on a call the carrier is already on. It cannot decide."""
+    calls: list[str] = []
+    client = routing_client({"docket-number": recorded_carrier(), "/authority": reply}, calls)
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        check = client.check("123456")
+
+    assert check.eligible
+    assert check.authority_age_days is None
+    assert str(reply.status_code) in caplog.text  # a wrong path shows up as a 404
+
+
+def test_the_authority_log_never_carries_the_web_key(caplog):
+    secret = "web-key-that-must-not-reach-a-log"
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "/authority" in str(request.url):
+            return httpx.Response(200, json={"content": [{"note": secret}]})
+        return httpx.Response(200, json=recorded_carrier())
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    client = FmcsaClient("https://mobile.fmcsa.dot.gov/qc/services", secret, client=http)
+
+    with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
+        client.check("123456")
+
+    assert secret not in caplog.text
+    assert "***" in caplog.text
+    # Nor the URL it was attached to.
+    assert "webKey" not in caplog.text
+
+
 # --- the wrapper around the carrier -------------------------------------
 #
 # The response we recorded was logged as the carrier object itself — the
@@ -403,13 +516,23 @@ def test_the_log_line_never_carries_the_web_key(caplog):
     assert "***" in _warnings(caplog)
 
 
-def test_a_recognised_payload_is_not_dumped_into_the_log(caplog):
-    """Otherwise every healthy call in production writes a carrier record."""
+def test_a_recognised_carrier_payload_is_not_dumped_into_the_log(caplog):
+    """Otherwise every healthy call in production writes a carrier record.
+
+    The authority record is the exception, and deliberately so: it is the one
+    whose field names are still unknown, so it is the one that gets printed.
+    """
+    calls: list[str] = []
+    client = routing_client(
+        {"docket-number": recorded_carrier(), "/authority": {"content": []}}, calls
+    )
+
     with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
-        check = client_for(recorded_carrier()).check("123456")
+        check = client.check("123456")
 
     assert check.eligible
-    assert "payload=" not in _warnings(caplog)
+    assert "B MARRON LOGISTICS LLC" not in _warnings(caplog)
+    assert "did not carry the fields we need" not in _warnings(caplog)
 
 
 def test_the_tax_id_never_reaches_the_log(caplog):

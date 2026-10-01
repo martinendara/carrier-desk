@@ -108,6 +108,28 @@ def to_api_error(exc: Exception) -> ApiError:
     )
 
 
+def describe_validation_errors(errors: list[dict]) -> str:
+    """Field paths and error kinds, one per failed field. Never the values.
+
+    Pydantic hands back a list of dicts that includes the offending input under
+    `"input"`. That key is not read here: this line goes to a log, and the field
+    name is what identifies the mistake anyway — "body.mc_number: string_type"
+    is the whole diagnosis, and the value that arrived is the caller's.
+
+    The same rule applies to `msg`, which pydantic builds from the constraint
+    rather than from the input ("Input should be a valid string"), and to our
+    own validators, whose messages name the field and the rule and never echo
+    what they rejected.
+    """
+    described = []
+    for error in errors:
+        location = ".".join(str(part) for part in error.get("loc", ())) or "<body>"
+        kind = error.get("type", "unknown")
+        message = str(error.get("msg", "")).strip()
+        described.append(f"{location}: {kind} ({message})" if message else f"{location}: {kind}")
+    return "; ".join(described) or "<no detail>"
+
+
 #: Domain exception bases that must never reach the generic handler. Registering
 #: the bases rather than every leaf means a new exception type added under one of
 #: them is mapped automatically instead of escaping as a 500 — and the generic
@@ -158,7 +180,16 @@ def install_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         # The field names and reasons are logged, not returned: the agent gets a
         # sentence it can say, and whoever is debugging gets the detail.
-        logger.warning("invalid request on %s: %s", request.url.path, exc.errors())
+        #
+        # This is the line that answers "the platform's test panel returns 422
+        # and we cannot see which field it is sending wrong". It names the
+        # field and the kind of problem, and nothing else — the value that
+        # failed is in `exc.errors()` too, and is deliberately dropped.
+        logger.warning(
+            "invalid request on %s: %s",
+            request.url.path,
+            describe_validation_errors(exc.errors()),
+        )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"error": "invalid_request", "say": phrasing.INVALID_REQUEST},

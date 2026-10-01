@@ -47,6 +47,12 @@ class AuthorityCheck:
     legal_name: str | None = None
     dot_number: str | None = None
     reason: IneligibilityReason | None = None
+    #: True when the carrier holds operating authority of one kind or another.
+    #: False for every other outcome, including the refusals decided before the
+    #: authority is even reached — there is a difference between "no authority"
+    #: and "never got that far", and callers that need it (the authority age,
+    #: worth looking up only for a carrier that has one) read it here.
+    authority_active: bool = False
     #: Days since the authority was granted. **Always None today**: the carrier
     #: payload carries no authority date at all, so there is nothing to measure
     #: from. Onboarding reads unknown as Review, which is the safe direction.

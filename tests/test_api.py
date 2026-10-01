@@ -9,6 +9,7 @@ live TMS.
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 
 import httpx
@@ -183,6 +184,40 @@ def test_run_id_is_required(api, path):
 
     assert response.status_code == 422
     assert response.json()["error"] == "invalid_request"
+
+
+def test_a_refused_body_is_logged_field_by_field_without_the_values(api, caplog):
+    """The line that answers "the panel returns 422 and we cannot see why".
+
+    The agent still gets a sentence, because a carrier is on the line. Whoever
+    is reading the log gets the field and the kind of problem — which is what
+    identifies a tool configured to send the wrong thing — and not the value,
+    which is the caller's.
+    """
+    client, _ = api
+
+    with caplog.at_level(logging.WARNING, logger="app.api.errors"):
+        response = client.post(
+            "/carriers/verify",
+            json={"run_id": "run-1", "mc_number": 12345678},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+    logged = caplog.text
+    assert "mc_number" in logged
+    assert "string_type" in logged
+    assert "12345678" not in logged  # the value never travels
+
+
+def test_a_missing_field_says_which_field_is_missing(api, caplog):
+    client, _ = api
+
+    with caplog.at_level(logging.WARNING, logger="app.api.errors"):
+        client.post("/carriers/verify", json={"run_id": "run-1"}, headers=HEADERS)
+
+    assert "mc_number" in caplog.text
+    assert "missing" in caplog.text
 
 
 def test_an_agent_cannot_smuggle_an_id_field(api):
