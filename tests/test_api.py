@@ -957,3 +957,68 @@ def test_live_tms_is_fine_in_production():
         assert app.state.container.fake_tms is None
     finally:
         app.state.container.close()
+
+
+def test_an_empty_api_key_is_refused_in_production():
+    """Left to fail at request time it is a 503 that looks like an outage."""
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="production",
+                tms_mode="live",
+                tms_host="tms.example.test",
+                tms_port=1234,
+                tms_token="token",
+                service_api_key="",
+                otp_hmac_secret=SECRET,
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "SERVICE_API_KEY" in str(caught.value)
+
+
+def test_an_empty_otp_secret_is_refused_in_production():
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="production",
+                tms_mode="live",
+                tms_host="tms.example.test",
+                tms_port=1234,
+                tms_token="token",
+                service_api_key=API_KEY,
+                otp_hmac_secret="",
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "OTP_HMAC_SECRET" in str(caught.value)
+
+
+def test_the_tms_mode_guard_is_reported_first():
+    """When several things are wrong, the most consequential one is named."""
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="production",
+                tms_mode="fake",
+                service_api_key="",
+                otp_hmac_secret="",
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "TMS_MODE=fake" in str(caught.value)
+
+
+def test_empty_secrets_are_still_fine_in_development():
+    """The guards are production-only; development stays forgiving."""
+    with api_app(env="development", service_api_key="dev-key", otp_hmac_secret=SECRET) as (client, _):
+        assert client.get("/health").json() == {"status": "ok"}

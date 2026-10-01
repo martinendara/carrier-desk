@@ -388,13 +388,23 @@ New in phase 4:
 
 7. **The rate limiter is per process**, so a second replica would double the effective
    limit. It pairs with the one-replica constraint rather than standing alone.
-8. **`SERVICE_API_KEY` empty in production does not fail startup** — it starts and then
-   answers 503 to everything. The fake-TMS guard is the only startup guard; this one is a
-   candidate for the same treatment.
-9. **No CI.** Nothing runs the suite on push; it is green because it was run here.
+8. ~~`SERVICE_API_KEY` empty in production does not fail startup~~ — fixed in the
+   follow-up above, along with the OTP secret.
+9. ~~No CI.~~ — `.github/workflows/tests.yml` runs the suite on every push.
 10. **The deploy is documented, not executed.** The one-command path and the required
     variables are untested against the platform's own behaviour.
 
 ### Done
 
 All four phases of CLAUDE.md §10.
+
+### Follow-up (same phase)
+
+- **The production guard is now a set.** `ENV=production` also refuses to start with an
+  empty `SERVICE_API_KEY` or an empty `OTP_HMAC_SECRET`, both of which previously started
+  and failed at request time in a way that looks like an outage. Ordering puts the fake-TMS
+  message first when several are wrong. Four tests added — **428 passed**.
+- **CI.** `.github/workflows/tests.yml` runs `pytest` on every push and pull request, with
+  the badge in the README. No secrets and no `.env`: every test runs against the in-process
+  fake TMS and a mocked FMCSA, so the job needs nothing from the environment. That absence
+  is the point — it is what makes the badge mean something.

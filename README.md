@@ -1,5 +1,7 @@
 # carrier-desk
 
+[![tests](https://github.com/martinendara/carrier-desk/actions/workflows/tests.yml/badge.svg)](https://github.com/martinendara/carrier-desk/actions/workflows/tests.yml)
+
 Backend service for the inbound carrier sales voice agent (HappyRobot FDE challenge).
 
 A freight brokerage's voice agent handles the first leg of an inbound carrier call:

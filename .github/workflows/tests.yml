@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+# A new push supersedes the run it replaced; there is no reason to finish
+# testing a commit nobody will look at again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      # No secrets and no services: every test runs against the in-process fake
+      # TMS and a mocked FMCSA, so this job needs nothing from the environment.
+      # The real .env is gitignored and absent here, which is the point — a test
+      # that only passes with a developer's configuration is not a test.
+      - name: Test
+        run: python -m pytest

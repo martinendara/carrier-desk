@@ -773,3 +773,46 @@ it fails in a way that looks like a broken integration rather than a sleeping ho
 honest trade is continuous billing on Railway rather than a free tier that cannot answer.
 
 ---
+
+---
+
+## 42. Production readiness is a set of guards, not one guard
+
+**Problem.** The fake-TMS guard covered the misconfiguration that is most embarrassing,
+but not the ones that are merely fatal: an empty `SERVICE_API_KEY` starts and answers 503
+to every tool, and an empty `OTP_HMAC_SECRET` starts and refuses every code. Both look like
+an outage from the platform's side, and neither names the variable that is wrong.
+
+**Choice.** One `_enforce_production_guards` runs on any `ENV=production` and refuses to
+start on a fake TMS, an empty API key, or an empty OTP secret — in that order, so the
+message names the most consequential problem first.
+
+**Rejected.** Guards scattered at the point of use. `OtpService` already refused an empty
+secret, but the failure named the class rather than the environment, and the API key had no
+guard at all.
+
+**Why.** A deployment that starts and cannot work is worse than one that does not start:
+the first one gets debugged at 2am against a live carrier. Ordering matters too — when
+several things are wrong at once, the message should be about the one that would have
+quoted a carrier a load that does not exist.
+
+---
+
+## 43. CI runs the suite with no secrets at all
+
+**Problem.** The suite is green because it was run on one machine, by hand. Nothing stops a
+commit that breaks it from reaching the branch.
+
+**Choice.** A GitHub Actions job on every push and pull request, installing with
+`pip install -e ".[dev]"` and running `pytest`. **No secrets, no service containers, no
+`.env`.**
+
+**Rejected.** Passing repository secrets into the job "so it matches local". Every test
+already runs against the in-process fake TMS and a mocked FMCSA — that is why the suite
+needs nothing. A test that only passes with a developer's configuration is not a test, and
+a job with credentials is a job that can leak them.
+
+**Why.** The absence of configuration is the point, not a limitation to work around. It
+also means the workflow file stays readable, and a fork can run it.
+
+---

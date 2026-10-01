@@ -31,17 +31,42 @@ MEMORY_SINK = "memory"
 SECONDS_PER_HOUR = 3600.0
 
 
-def _refuse_fake_in_production(settings: Settings) -> None:
-    """`TMS_MODE=fake` serves recorded fixtures. Shipping that is not a bug you
-    notice later — it is a real carrier being quoted a load that does not exist.
+def _enforce_production_guards(settings: Settings) -> None:
+    """Refuse to start in production with a configuration that cannot work.
 
-    Refusing at startup turns a silent misconfiguration into a container that
-    will not come up, which is the failure everyone notices.
+    Each of these is a misconfiguration that produces a service which looks
+    alive and is not:
+    a fake TMS quotes freight that does not exist; an empty API key answers 503
+    to every tool; an empty OTP secret cannot issue a code.
+
+    Refusing at startup turns all three into a container that will not come up,
+    which is the failure everyone notices. Checked in this order so the message
+    names the most consequential problem first.
     """
-    if settings.is_production and settings.tms_mode.strip().lower() == "fake":
+    if not settings.is_production:
+        return
+
+    if settings.tms_mode.strip().lower() == "fake":
         raise ConfigurationError(
             "TMS_MODE=fake serves recorded fixtures and must not run with "
             "ENV=production. Set TMS_MODE=live, or unset ENV."
+        )
+
+    if not settings.service_api_key.get_secret_value():
+        # Left to fail at request time it would answer 503 to every tool, which
+        # from the platform's side is indistinguishable from an outage.
+        raise ConfigurationError(
+            "SERVICE_API_KEY is empty and ENV=production. Every request would be "
+            "refused. Set it to the key the platform sends as X-API-Key."
+        )
+
+    if not settings.otp_hmac_secret.get_secret_value():
+        # OtpService refuses an empty secret on its own, but that failure names
+        # the class rather than the environment.
+        raise ConfigurationError(
+            "OTP_HMAC_SECRET is empty and ENV=production. No code could be "
+            "issued. Generate one with: python -c \"import secrets; "
+            'print(secrets.token_urlsafe(32))"'
         )
 
 
@@ -78,7 +103,7 @@ class Container:
 
     @classmethod
     def build(cls, settings: Settings) -> "Container":
-        _refuse_fake_in_production(settings)
+        _enforce_production_guards(settings)
 
         store = RunSessionStore(ttl_seconds=settings.run_session_ttl_seconds)
         sink = build_event_sink(settings)
