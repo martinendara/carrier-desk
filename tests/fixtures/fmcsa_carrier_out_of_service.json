@@ -1,0 +1,13 @@
+{
+  "content": {
+    "carrier": {
+      "allowedToOperate": "Y",
+      "legalName": "BADGER HAULAGE INC",
+      "dotNumber": "1112223",
+      "mcNumber": "778899",
+      "statusCode": "A",
+      "outOfService": true,
+      "addDate": "2015-02-01T00:00:00.000"
+    }
+  }
+}

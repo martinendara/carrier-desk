@@ -93,51 +93,98 @@ Read `docs/tms-protocol.md` first.
 
 ## 6. OTP
 
-- 6-digit code, cryptographically random, stored hashed with a 5-minute TTL, max 3 verification attempts, then the session is locked.
-- The code is sent to the **contact on file** (`carriers/directory.py`, seeded for the demo), never to a destination dictated by the caller. Return the masked destination (`***-***-1234`) so the agent can say where it was sent.
-- Delivery: the service generates the code; the HappyRobot workflow sends the SMS. Expose the code only to the platform SMS step, not to the agent's conversation context. **Open decision** — confirm after exploring the platform; keep the send step behind an interface.
+**Email only for the POC.** No SMS provider is wired up, and the contact on file has an address.
+
+- The carrier directory (`carriers/directory.py`) holds a **contact email** per MC. The code goes to that address and nowhere else — never to a destination the caller dictates.
+- 6 digits from `secrets`, stored as **HMAC-SHA256 keyed with a server-side secret**, not a plain hash. Six digits is a million possibilities: an unsalted digest is brute-forced instantly, and a leaked table would hand over every live code.
+- TTL 5 minutes, 3 verification attempts then the session is locked, 1 resend.
+- `send` returns **two views**: `{code, destination}` for the platform's delivery node, and `{masked_destination}` for the agent (`m***@gmail.com`). The platform keeps them apart (Tool Call Result); this service documents which field is for whom, and only the masked one is agent-facing.
+- An MC with **no contact on file** gets no OTP at all: the call is routed to onboarding (`routed_onboarding`).
 - No bypass endpoint, no debug code, no "admin override".
 
 ## 7. Negotiation engine (deterministic)
 
-- `open(load_id, mc)` → fetches the load (with `MAX_BUY`) server-side, creates a session, returns `opening_offer = min(RATE, MAX_BUY)`.
-- `counter(session_id, carrier_ask)` → returns one of `accept(rate)`, `counter(rate)`, `final_no_deal`.
-- Up to 3 counter rounds. Concession thresholds step from the opening offer toward the ceiling (default 40% / 75% / 100% of the gap, configurable). If `carrier_ask ≤ threshold` for the round → accept at `carrier_ask`. Otherwise counter at the threshold (never above `MAX_BUY`). After round 3 without agreement → `final_no_deal` (no transfer).
-- Carrier accepting the current offer → accept.
-- Edge case: `RATE ≥ MAX_BUY` → open at `MAX_BUY`, no room to concede; still allow acceptance.
-- Responses never contain `MAX_BUY`, the gap, or the thresholds.
-- Session stores the agreed rate; booking reads it from the session.
+`C = MAX_BUY`. It never leaves the server: not in an agent-facing response, not in a log line the agent can see.
+
+**Opening offer `O`**, computed when the negotiation is created from a `LoadDetail`:
+- `RATE < C` → `O = floor25(RATE)`
+- otherwise → `O = floor25(0.90 × C)`
+
+`floor25` rounds **down** to a multiple of 25.
+
+**Urgent** = pickup less than 24 h from now, in the timezone fixed by `DECISIONS.md` §2 (UTC).
+
+**Concession steps**, as a fraction of the gap `C − O`:
+
+| Round | Normal | Urgent |
+|---|---|---|
+| 1 | 40% | 60% |
+| 2 | 75% | 90% |
+
+Each step is `floor25`-ed, capped at `C − 25`, and never below the current offer + 25. If the cap does not allow the increment, the step stays at the cap.
+
+**A round is one carrier request, counted by the server.** For each request:
+1. request ≤ current offer → **accept** at the request.
+2. rounds 1 and 2: request ≤ step → **accept** at the request; otherwise **counter** at the step.
+3. round 3: request ≤ `C` → **accept** at the request; otherwise **close** with no transfer, and record `gap = request − C`.
+
+Never counter above the request. Never offer more than `C − 25`. A fourth request is refused.
+
+**Agent-facing response:** `{action: accept|counter|close, amount}`. Nothing else — no `C`, no gap, no steps.
 
 ## 8. HTTP API (tools for the voice agent)
 
 All endpoints require `X-API-Key`. Responses are short and agent-friendly (the agent speaks them).
 
+**Every call carries a `run_id`** that the platform injects as a fixed parameter into all tools. The agent never passes `otp_session_id`, `negotiation_id` or a round number — the server resolves all of that from the `run_id`. Per `run_id` the server keeps the OTP state, the loads shown during that call, the active negotiation and the round counter.
+
+- A `load_id` can only be negotiated if it was **shown during that same call**.
+- At most **2 negotiations per call**: the original load plus one alternative.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness (no auth) |
-| POST | `/carriers/verify` | `{mc_number}` → eligibility |
-| POST | `/otp/send` | `{mc_number}` → `{otp_session_id, masked_destination}` |
-| POST | `/otp/verify` | `{otp_session_id, code}` → `{verified, attempts_left}` |
-| POST | `/loads/search` | filters (origin city/state, destination state, equipment, date) → up to 3 loads, no `MAX_BUY` |
+| POST | `/carriers/verify` | `{run_id, mc_number}` → eligibility |
+| POST | `/otp/send` | `{run_id, mc_number}` → `{masked_destination}` for the agent, `{code, destination}` for the platform |
+| POST | `/otp/verify` | `{run_id, code}` → `{verified, attempts_left}` |
+| POST | `/loads/search` | `{run_id, filters...}` → up to 3 loads, no `MAX_BUY` |
 | GET | `/loads/{load_id}` | detail for the pitch, no `MAX_BUY` |
-| POST | `/negotiations` | `{load_id, mc_number, otp_session_id}` → `{negotiation_id, offer}` (requires verified OTP) |
-| POST | `/negotiations/{id}/counter` | `{carrier_ask}` → decision |
-| POST | `/bookings` | `{negotiation_id}` → books via TMS with stored rate |
-| POST | `/handoff` | `{booking}` → mocked senior-rep queue |
+| POST | `/negotiations` | `{run_id, load_id}` → `{offer}` (requires verified OTP) |
+| POST | `/negotiations/counter` | `{run_id, carrier_ask}` → `{action, amount}` |
+| POST | `/bookings` | `{run_id}` → books via TMS with the rate stored in the session |
+| POST | `/handoff` | `{run_id}` → mocked senior-rep queue |
 
 Gating: search, negotiation and booking require a verified OTP session for the same MC.
 
-## 9. Build phases and checkpoints
+**Result codes (closed set):** `booked`, `booking_pending`, `negotiation_failed`, `no_match`, `otp_failed`, `routed_onboarding`, `fmcsa_rejected:<reason>`. Nothing outside this list; `fmcsa_rejected` carries its reason as a suffix.
+
+**Lead qualification** (pure function, no LLM). Evaluated in this order:
+1. authority age < 90 days, **or** unknown, **or** zero matching loads → `Review`
+2. otherwise ≥ 3 matching loads → `Hot`
+3. otherwise → `Warm`
+
+The FMCSA fields this reads stay marked `TODO: verify` until a real response is recorded.
+
+## 9. Event log
+
+The service records **what it decided**; the platform records the conversation. Two audiences, two stores — so the events are ours to shape.
+
+- `EventSink` interface with an in-memory implementation and a JSONL file implementation for now. The Twin adapter comes later, because its authentication is not confirmed.
+- Event shape: `{run_id, ts, type, payload}`.
+- Types: `fmcsa_checked`, `otp_sent`, `otp_verified`, `otp_failed`, `search_performed` (with the filters and the result count, **including when it is 0**), `load_pitched`, `negotiation_opened`, `negotiation_round`, `negotiation_closed`, `booking_attempted`, `booking_result`, `handoff_created`, `lead_created`.
+- Events **may** contain `C`, because they are internal and never travel back to the agent. A test asserts that no agent-facing response contains a `C` value.
+
+## 10. Build phases and checkpoints
 
 **Phase 1 — TMS adapter (highest risk).** `protocol.py`, `client.py`, `models.py`, `fake_tms.py` (modes: normal, timeout, partial, malformed, delayed), tests for every fault class plus fixtures from real samples. Checkpoint: `pytest` green; a script `scripts/tms_smoke.py` runs one real `LOAD_QUERY` and one `LOAD_GET` against the live server using `.env`. Stop and report.
 
-**Phase 2 — FMCSA, OTP, negotiation.** Units with tests, including negotiation edge cases (accept first offer, three rounds fail, `RATE ≥ MAX_BUY`, ask below offer). Checkpoint: tests green. Stop and report.
+**Phase 2 — FMCSA, OTP, negotiation, onboarding, events, run sessions (units only, no HTTP).** `app/fmcsa`, `app/otp`, `app/negotiation`, `app/onboarding`, `app/events`, plus the session keyed by `run_id`. FMCSA runs against fixtures (it blocks Argentina) and fails closed on outage. Checkpoint: `pytest` green; `DECISIONS.md` and `docs/walkthrough.md` updated; commit locally on main; report and stop.
 
 **Phase 3 — HTTP API + auth.** Wire everything, gating, error mapping, agent-friendly messages. Checkpoint: API tests green; `curl` examples in `README.md`. Stop and report.
 
 **Phase 4 — Docker + deploy.** `Dockerfile`, `docker-compose.yml`, `docker compose up` runs the service with `.env`. Deploy to a US-region host with public HTTPS. Checkpoint: `/health` reachable publicly; FMCSA verified live from the deployment. Stop and report.
 
-## 10. Working rules
+## 11. Working rules
 
 - One phase at a time. At each checkpoint append to `PROGRESS.md`: what was done, test results, open issues.
 - For every non-obvious decision, add to `DECISIONS.md`: problem → choice → rejected alternative → why. Plain English, 3–5 lines each.

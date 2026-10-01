@@ -1,9 +1,13 @@
 # Walkthrough — how a request travels through the TMS adapter
 
 Written to be read out loud. Each section follows one step further in, in the same order a
-real call takes. Phase 1 only: the TMS adapter. There is no HTTP API yet.
+real call takes.
 
-The whole adapter is four small files under `app/`, plus a fake server in `tests/`.
+- **Sections 1–12: phase 1**, the TMS adapter — four small files under `app/tms/`, plus a
+  fake server in `tests/`.
+- **Sections 13–21: phase 2**, verification, OTP, negotiation, onboarding and events.
+
+There is still no HTTP API; that is phase 3.
 
 ```
 settings ─▶ TmsClient.query_loads ─▶ encode_request ─▶ socket ─▶ _read_response
@@ -210,3 +214,182 @@ name is wrong.
 
 A `guard()` function refuses any command except `DEBUG_ECHO`, `LOAD_QUERY` and `LOAD_GET`,
 so no future edit can make this script book a load by accident.
+
+---
+
+# Phase 2 — how a call flows now
+
+Still no HTTP layer: these are the units the API will call, in the order a call reaches them.
+
+```
+run_id ─▶ RunSessionStore ─┬─▶ FmcsaClient.check      (who is this carrier)
+                           ├─▶ OtpService.send/verify (prove it)
+                           ├─▶ shown loads            (what they were pitched)
+                           └─▶ NegotiationEngine      (what we will pay)
+                                     │
+                              EventSink ◀── everything that got decided
+```
+
+---
+
+## 13. `app/sessions/` — one call, one bag of state
+
+Everything hangs off the `run_id` the platform injects into every tool. There is no
+`otp_session_id` and no `negotiation_id` travelling through the conversation, which means
+the agent cannot drop one, replay one, or make one up. The agent talks; the server
+remembers.
+
+`RunSession` holds the MC being verified, the OTP challenge, the list of loads that were
+shown, and the negotiations. Two rules live on it because they are about the call rather
+than about any one feature:
+
+- `record_shown_load` / `was_shown` — a load is negotiable **only** if it was pitched during
+  this same call. A `load_id` is a short, guessable string; without this, anything driving
+  the conversation could name any load in the system.
+- `can_open_negotiation` — two negotiations per call, the original plus one alternative.
+
+`RunSessionStore` is a dictionary with a TTL and a lock. The TTL runs on a **monotonic**
+clock, so a wall-clock jump cannot expire a live call. It is deliberately process-local:
+one worker, one dictionary, documented as a POC constraint with Redis behind the same
+interface as the production path.
+
+State types (`OtpChallenge`, `NegotiationSession`) live here rather than in the feature
+packages, which keeps the dependency arrow one-way — `otp`, `negotiation` and `onboarding`
+import from `sessions`, and `sessions` imports from none of them.
+
+---
+
+## 14. `app/carriers/directory.py` — the only place an OTP can go
+
+A seeded table of MC number → contact. `send` looks the destination up here or nowhere:
+the caller can say any address they like and it changes nothing. An MC that is not in the
+table has no contact on file, and that is a different outcome (`routed_onboarding`), not an
+error.
+
+Exact-match lookup, deliberately: a fuzzy match would let a caller reach a contact that is
+not theirs by naming something close to it.
+
+---
+
+## 15. `app/fmcsa/client.py` — verify, then fail closed
+
+`check(mc)` validates the MC locally (digits, 1–8) so a malformed one never reaches the
+network, then fetches the carrier and returns an `AuthorityCheck`.
+
+The order of the checks is the one in CLAUDE.md §5: found, allowed to operate, authority
+active, not out of service. A 404 means FMCSA does not know the MC — an answer, and a
+different result code from an outage.
+
+**Everything fails closed.** A timeout, a 403 (which is what this domain returns to the
+whole of Argentina), a 5xx, a block page arriving as `200 text/html`, or a payload whose
+fields we cannot read — all of them mean `eligible=False`. The failure modes are
+`verification_unavailable` for "could not ask" and `incomplete_response` for "asked and
+could not understand the answer".
+
+The parser is defensive because every field name in it is a guess: it accepts several
+spellings of each key, several date formats, booleans as `Y`/`N`/`true`/`1`, and a carrier
+object wrapped in `content`, in a list, or bare. None of this has been verified against a
+real response — see `tests/fixtures/README.md`.
+
+---
+
+## 16. `app/otp/security.py` — codes, digests and masking
+
+Three pure functions, and the reasoning behind the two that matter is in the module: the
+code comes from `secrets.randbelow`, not a modulo of a float; the stored value is an
+HMAC-SHA256 keyed with a server secret, with the `run_id` mixed into the message so a
+digest is bound to the call it was issued for; and comparison is `hmac.compare_digest` so a
+wrong code cannot be found one byte at a time.
+
+`mask_email` turns `dispatch@ridgelinefreight.com` into `d***@ridgelinefreight.com` — enough
+for the agent to say where the code went, and not enough for someone on the call to learn
+the address of a carrier they are not.
+
+---
+
+## 17. `app/otp/service.py` — issue, verify, and two audiences
+
+`send` and `resend` produce an `OtpDispatch` with two named views:
+
+- `delivery_view` → `{destination, code}`. For the platform's delivery node.
+- `agent_view` → `{masked_destination}`. This is what may reach the conversation.
+
+The code field is `repr=False`, so a stray log of the object does not print it, and no event
+carries it. Splitting the response by audience is the server's job even though acting on the
+split is the platform's: two named fields is a shape that cannot be merged by accident.
+
+The budget is three attempts and one resend, and the two interact deliberately — **a resend
+does not refund attempts**, and a locked session cannot be resent at all. Otherwise three
+guesses becomes six, and the lock becomes removable by asking for a new code.
+
+`send` called twice spends the resend budget, so the limit cannot be bypassed by hammering
+the send endpoint instead of the resend one.
+
+---
+
+## 18. `app/negotiation/policy.py` — the arithmetic, and nothing else
+
+No state, no clock of its own. `floor_to`, `is_urgent`, `opening_offer` and
+`concession_step`, all checkable by hand against CLAUDE.md §7.
+
+Two things worth knowing when reading it:
+
+- `opening_offer` applies the `C − 25` cap to the opening too, not just to the steps. The
+  brief states the margin as a global rule; it only ever binds when the posted rate sits
+  within one increment of the ceiling (DECISIONS.md §20).
+- The steps arrive as `Fraction`, so `0.40 × gap` is exactly 2/5 of the gap. With floats,
+  a step could land a hair below a multiple of 25 and `floor25` would drop a whole
+  increment — for some gaps and not others.
+
+---
+
+## 19. `app/negotiation/engine.py` — the rounds
+
+`open(run_id, load)` checks that the load was shown in this call and that the call still has
+a negotiation left, requires a ceiling, computes the opening offer and whether the pickup is
+urgent, and records a `negotiation_opened` event that is allowed to contain the ceiling.
+
+`counter(run_id, carrier_ask)` is one round, and the server counts them — the agent cannot
+skip one, and a fourth request finds nothing open. The three cases are the ones in §7:
+
+1. at or below the current offer → accept at the request;
+2. rounds 1 and 2 → accept if the request is at or below the step, otherwise counter at the
+   step;
+3. the last round → accept anything at or below the ceiling, otherwise close and record the
+   gap.
+
+`Decision.agent_view` is `{action, amount}` and nothing else. On a close, the amount is the
+**last offer**, never the ceiling — the helpful-looking value there is the one that must
+never leak (DECISIONS.md §21).
+
+The engine deliberately knows nothing about OTP. The gating rule in §8 belongs to the API
+layer in phase 3, and is listed as an open issue in `PROGRESS.md` so it cannot be forgotten.
+
+---
+
+## 20. `app/onboarding/qualification.py` — a rule, not a judgement
+
+`qualify(authority_age_days, matching_loads)` returns Hot, Warm or Review. Review
+short-circuits first: an unknown age, an authority younger than 90 days, or a call where
+nothing matched. Only then do the matching-load thresholds apply.
+
+An unknown age is treated as **unqualified**, not as old enough — the 90-day rule exists to
+protect against brand-new authorities, and "probably fine" is how one gets handed a load.
+
+---
+
+## 21. `app/events/` — what the service decided
+
+`Event = {run_id, ts, type, payload}`, with the type list closed in `EventType`. Three
+sinks: `NullEventSink` (the default, so nothing upstream has to be optional),
+`InMemoryEventSink` (tests and demos), and `JsonlEventSink` (one JSON object per line,
+opened per write rather than held open)
+
+A failed write logs and returns rather than raising: losing an audit line must not drop a
+carrier who is mid-negotiation. Twin is deliberately absent — its authentication is not
+confirmed, and guessing at it would bake a wrong shape into every call site.
+
+Events **may** contain the ceiling, because they are internal and never travel back to the
+agent. That is the whole reason `test_call_flow.py` exists: it walks a complete call, gathers
+every agent-facing value, and asserts the ceiling is not among them — as a number or as a
+key name — while the event log has it.

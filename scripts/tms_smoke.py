@@ -31,12 +31,7 @@ if str(REPO_ROOT) not in sys.path:  # allow `python scripts/tms_smoke.py`
 
 from app.config import get_settings  # noqa: E402
 from app.tms.client import TmsClient  # noqa: E402
-from app.tms.protocol import (  # noqa: E402
-    TmsError,
-    TmsFault,
-    encode_request,
-    redact,
-)
+from app.tms.protocol import TmsFault, encode_request, redact  # noqa: E402
 
 #: Commands this script is allowed to send. Anything else is a bug.
 READ_ONLY_COMMANDS = frozenset({"DEBUG_ECHO", "LOAD_QUERY", "LOAD_GET"})

@@ -104,4 +104,100 @@ filter name, whether `FLATBED` is a real equipment value, and today's padding.
 
 ### Not started
 
-Phases 2–4: FMCSA client, OTP, negotiation engine, the HTTP API, Docker and deployment.
+Phase 3 (HTTP API) and phase 4 (Docker, deployment). Phase 2 followed in the next section.
+
+---
+
+## Phase 2 — FMCSA, OTP, negotiation, onboarding, events (2026-10-01)
+
+**Status:** code complete and tested. Units only — there is no HTTP layer yet. The live
+smoke run is still blocked on the TMS token (see phase 1).
+
+### What was built
+
+| Module | Purpose |
+|---|---|
+| `app/sessions/` | `RunSession` keyed by `run_id`: OTP state, loads shown, active negotiation, round counter. In-memory store with a monotonic TTL. |
+| `app/fmcsa/` | Authority check. Fails closed on outage, on an error status, and on a payload whose signals we cannot read. |
+| `app/otp/` | Email OTP: `secrets` codes, HMAC-SHA256 with the `run_id` mixed in, 5-minute TTL, 3 attempts, 1 resend. Two response views, one per audience. |
+| `app/negotiation/` | `policy.py` is the arithmetic (pure, exact rationals); `engine.py` is the round machine over the run session. |
+| `app/onboarding/` | Hot / Warm / Review as a pure function. |
+| `app/events/` | `EventSink` with in-memory and JSONL implementations. Twin deferred. |
+| `app/carriers/directory.py` | Seeded contacts. The only source of an OTP destination. |
+| `app/results.py` | The closed set of result codes. |
+
+CLAUDE.md sections 6, 7 and 8 were replaced and a new section 9 (event log) added, per the
+patch. Section 8 now carries the `run_id` contract and the closed result-code list.
+
+### Tests
+
+```
+335 passed in 2.44s
+```
+
+| File | Tests | Covers |
+|---|---|---|
+| `test_negotiation.py` | 49 | every edge case in the patch, plus the leak check |
+| `test_protocol.py` | 45 | phase 1 wire format, both padding styles |
+| `test_otp.py` | 43 | generation, HMAC, masking, budget, resend, lock |
+| `test_client_faults.py` | 41 | phase 1 fault classes and ambiguous booking |
+| `test_fmcsa.py` | 36 | eligibility, fail-closed paths, defensive key parsing |
+| `test_sessions.py` | 29 | keying, TTL, shown loads, the two-negotiation budget |
+| `test_results.py` | 26 | the closed set and reason sanitisation |
+| `test_models.py` | 24 | phase 1 record typing |
+| `test_onboarding.py` | 16 | the decision table and its ordering |
+| `test_events.py` | 13 | shape, sinks, surviving an unwritable disk |
+| `test_call_flow.py` | 7 | a whole call end to end |
+| `test_smoke_guard.py` | 6 | the smoke script cannot book |
+
+The mandatory negotiation cases are all present: ceiling above and below the posted rate, a
+narrow margin where rounding alone would nullify the concession, an ask below the opening,
+accepting the current offer, three failed rounds, urgent versus normal, a fourth round
+refused, and a `load_id` that was never shown in the call.
+
+The cross-cutting check the patch asked for is
+`test_a_full_call_never_puts_the_ceiling_in_front_of_the_agent`: it walks FMCSA, OTP, the
+pitch and three rounds, collects every agent-facing value, and asserts the ceiling appears in
+none of them as a number or as a key name — while the event log holds it.
+
+### Bug found by the tests, and fixed
+
+`fmcsa_rejected:<reason>` sanitised with `str.isalnum()`, which is true for `é`. A reason
+string can be read out loud by the agent, so the filter now also requires ASCII.
+
+### Deliberate interpretations, all recorded in DECISIONS.md
+
+- **The opening offer is capped at `C − 25`** too, not just the steps (§20). The two rules in
+  the brief conflict only when the posted rate is within one increment of the ceiling.
+- **A `close` reports the last offer, never the ceiling** (§21). The response shape has an
+  `amount` and the tempting value would be the one that must never leak.
+- **Accepting the final round at exactly `C` is allowed** (§22), which means the agent can
+  hear a number equal to the ceiling when the carrier asked for it. Named explicitly rather
+  than hidden behind a test that avoids the case.
+- **A resend does not refund attempts, and a locked session cannot be resent** (§17).
+- **A missing field from FMCSA is a rejection** (`incomplete_response`), not a pass (§27).
+
+### Open issues
+
+1. **TMS token rejected** — unchanged from phase 1; blocks the smoke observations. Consequence
+   for phase 2: no live load has ever been fetched, so `LoadDetail.max_buy` has only ever been
+   read from the recorded fixture.
+2. **Every FMCSA field name is `TODO: verify`.** The fixtures are synthetic. A wrong date key
+   does not fail loudly — it makes `authority_age_days` `None`, which routes the lead to
+   `Review`. See `tests/fixtures/README.md`.
+3. **No live FMCSA call has ever been made** from this machine (403 from Argentina). The
+   fail-closed paths are tested; the happy path is tested only against our own guess.
+4. **OTP delivery is not wired.** The service produces `{code, destination}`; whether the
+   platform's Tool Call Result can keep that away from the agent's context is still unconfirmed
+   — the same open decision phase 1 recorded.
+5. **Gating is not yet enforced.** §8 requires a verified OTP for the same MC before search,
+   negotiation and booking. That belongs to the API layer in phase 3 and is **not yet written
+   anywhere** — the engine deliberately does not know about OTP.
+6. **Single-instance sessions.** `RunSessionStore` is a process-local dictionary; Redis is the
+   production path (§28).
+7. **Timestamp zone still unconfirmed** (phase 1, DECISIONS §2). Urgency now depends on it:
+   a wrong zone shifts which pickups count as urgent.
+
+### Not started
+
+Phase 3 (HTTP API, auth, gating) and phase 4 (Docker, deployment).

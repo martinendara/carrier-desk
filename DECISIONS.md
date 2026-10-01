@@ -1,7 +1,9 @@
 # Design decisions
 
 One entry per non-obvious choice: problem → choice → rejected alternative → why.
-Phase 1 (TMS adapter) only.
+
+- Entries 1–11: phase 1, the TMS adapter.
+- Entries 12+: phase 2, carrier verification, OTP, negotiation, onboarding and events.
 
 ---
 
@@ -215,3 +217,302 @@ and a rep acts on that. If `LOAD_GET` is down we have no evidence at all, and re
 false certainty is worse than reporting a failure. It is also safe to re-drive: a second
 booking attempt on a consumed load returns `ALREADY_BOOKED`, which lands in
 `booked_unconfirmed`.
+
+---
+
+# Phase 2 — carrier verification, OTP, negotiation, onboarding, events
+
+---
+
+## 12. The call is the unit of state, keyed by `run_id`
+
+**Problem.** The first draft had the agent carry an `otp_session_id` between tools and a
+`negotiation_id` into every counter. Anything the agent carries, the agent can drop, replay
+or invent — and a language model will eventually do all three.
+
+**Choice.** The platform injects a `run_id` into every tool, and the server keeps everything
+per call: the OTP state, the loads shown, the active negotiation and the round counter. No
+tool takes an id that the agent could have made up.
+
+**Rejected.** Passing ids through the conversation and trusting them. It also makes every
+prompt longer and every failure mode weirder.
+
+**Why.** The agent's job is to talk. State that the agent cannot address is state the agent
+cannot corrupt.
+
+---
+
+## 13. A load can only be negotiated if it was shown during that call
+
+**Problem.** A `load_id` is a short, guessable string (`LD00896`). Without a check, whatever
+is driving the conversation can name any load in the system and start negotiating on it —
+including one that belongs to another carrier's call.
+
+**Choice.** The session records every load pitched to the carrier. `open` refuses anything
+else with `LoadNotShown`, even if the load exists and is open.
+
+**Rejected.** Validating only that the load exists and is `OPEN`. That checks the load, not
+the conversation.
+
+**Why.** The rule is not about the load's validity, it is about who is entitled to it. The
+carrier on the phone was pitched a specific set of loads, and that set is the whole universe
+of what this call may book.
+
+---
+
+## 14. At most two negotiations per call
+
+**Problem.** A call that can open negotiations without limit is a call that can shop for the
+best load across an entire database at the brokerage's expense, one pitch at a time.
+
+**Choice.** Two: the original load plus one alternative. The third raises
+`NegotiationLimitReached`.
+
+**Rejected.** One (too rigid — a carrier who genuinely dislikes the first load should hear
+one more) and unlimited (no bound at all).
+
+**Why.** Two is the smallest number that still covers the real conversation the voice agent
+is having: pitch, and if that fails, one more.
+
+---
+
+## 15. OTP goes to the contact on file, by email, and nowhere else
+
+**Problem.** The caller dictates everything else in the conversation. If the destination for
+the code came from them, the check would verify that whoever is on the phone can read the
+message they asked to receive — which is no check at all.
+
+**Choice.** `carriers/directory.py` is the only source of a destination. The POC uses email
+because no SMS provider is wired up. The agent is told only the masked address
+(`m***@gmail.com`), which is enough to say where the code went and not enough to learn the
+address of a carrier you are not.
+
+**Rejected.** Taking a destination from the caller, and returning the full address to the
+agent.
+
+**Why.** A verification step that the untrusted party controls is theatre.
+
+---
+
+## 16. Codes are stored as HMAC-SHA256, not as a hash
+
+**Problem.** A 6-digit code is a million possibilities. An unsalted SHA-256 of one is a
+table away from being read, and one leaked table would expose every live code at once.
+
+**Choice.** HMAC-SHA256 keyed with a server secret, with the `run_id` mixed into the message.
+The service refuses to start with a secret shorter than 16 bytes.
+
+**Rejected.** A plain digest, or storing the code itself. Also rejected: a per-code random
+salt — it protects a stolen table but not a live guess, which is the actual threat here.
+
+**Why.** Keying with a secret means a stolen table is worthless, and binding the `run_id`
+means a digest captured in one call cannot be replayed in another. Refusing a short secret
+is the difference between a control and the appearance of one.
+
+---
+
+## 17. A resend does not refund attempts
+
+**Problem.** "3 attempts, 1 resend" has two readings: the resend gives a fresh code with a
+fresh budget (up to six guesses), or the budget is per call (always three).
+
+**Choice.** Three guesses per call, no matter how many codes were issued. A locked session
+cannot be resent at all.
+
+**Rejected.** Resetting the counter on resend, which doubles the guessing budget and, worse,
+makes the lock removable by asking for a new code — exactly what the lock exists to prevent.
+
+**Why.** The lock is the security control. Anything that lifts it turns three guesses into
+six, and six into as many as you can ask for.
+
+---
+
+## 18. The OTP response has two views, and the service documents which is which
+
+**Problem.** The platform's delivery node needs the plaintext code; the agent must never see
+it. They are reachable from the same call, so a single flat response puts the code one
+prompt-injection away from the conversation.
+
+**Choice.** `OtpDispatch` exposes `delivery_view` (destination and code) and `agent_view`
+(masked destination only) as separate properties. The code field is `repr=False`, so a stray
+log of the object does not print it, and an event never carries it.
+
+**Rejected.** Returning one dictionary and documenting "the platform should not pass the code
+to the agent". A convention is not a boundary.
+
+**Why.** The separation is the platform's job to act on, but the server decides the shape it
+is asked to act on. Two named fields is a shape that cannot be merged by accident.
+
+---
+
+## 19. An MC with no contact on file gets no OTP and becomes a lead
+
+**Problem.** A carrier with no contact recorded still needs somewhere to go. Sending a code
+to a guessed address, or skipping verification and booking anyway, are both worse than
+admitting we cannot verify them.
+
+**Choice.** No contact means no code is generated. The call returns `routed_onboarding`, and
+the lead is qualified (Hot / Warm / Review) for a human to follow up.
+
+**Rejected.** Falling back to the number the caller gives, and failing the call outright.
+
+**Why.** The onboarding path turns an unverifiable caller into something a human can work
+with, instead of a dead end or a security hole.
+
+---
+
+## 20. The opening offer is also capped at `C − 25`
+
+**Problem.** The brief defines the opening as `floor25(RATE)` when `RATE < C`, and separately
+states "never offer more than `C − 25`". Those conflict when the posted rate sits within one
+increment of the ceiling: `floor25(2526)` is 2525, which is above `2528 − 25`.
+
+**Choice.** Apply the cap to the opening as well. It only binds in that pathological case —
+a posted rate within $25 of the private ceiling — and capping is the safe reading.
+
+**Rejected.** Reading the margin rule as applying only to the concession steps, which leaves
+the first number the carrier hears above the margin the rule exists to protect.
+
+**Why.** One rule that always holds beats two rules with an exception between them. The cost
+is a slightly lower opening on data that should not exist in the first place.
+
+---
+
+## 21. A `close` reports the last offer, never the ceiling
+
+**Problem.** The response shape is `{action, amount}`, including for `close`. The natural
+value to put there is the ceiling — the most we would have paid — and that would hand the
+agent the one number the whole design hides.
+
+**Choice.** `close` returns the last offer made, which is always at least one increment below
+`C` by construction.
+
+**Rejected.** Returning the ceiling, and returning `0`. Zero leaves the agent with nothing to
+say; the last offer is at least true and at least safe.
+
+**Why.** It is tempting to be "helpful" at the moment a deal fails. That is precisely when
+the ceiling must not slip out.
+
+---
+
+## 22. Accepting the carrier's own ask can equal the ceiling, and that is allowed
+
+**Problem.** The last round accepts any request at or below `C`. A carrier who asks for
+exactly `C` gets it, so the agent hears a number equal to the ceiling.
+
+**Choice.** Accept it, and say so plainly here rather than pretend the invariant is absolute.
+The agent learns the *rate that was agreed*, which is a legitimate business fact and is the
+carrier's own number coming back. What it still cannot learn is that this number is a
+ceiling — that we would have gone no higher.
+
+**Rejected.** Clamping the final acceptance below `C` to keep the invariant airtight, which
+would refuse the carrier a deal the brief says to take.
+
+**Why.** Naming the exception is better than a test that quietly avoids the case. The
+guarantee is "the agent is never told where the limit is", not "no number the agent sees ever
+equals it".
+
+---
+
+## 23. Money is computed with exact rationals, not floats
+
+**Problem.** The concession steps are decimals (0.40, 0.60, 0.90). Binary floating point
+cannot represent them exactly — 0.6 is stored as 0.599999999999999978 — and the product with
+the gap can land a hair below a multiple of 25, where `floor25` would drop a whole increment.
+
+**Choice.** Parse the steps into `Fraction` and do all the arithmetic exactly. A step is 2/5
+of the gap, not the nearest double to it.
+
+**Rejected.** Floats, with a tolerance, or rounding at the end. A tolerance is a guess about
+which cases need it.
+
+**Why.** This decides what the brokerage pays. It should not depend on how a particular gap
+rounds in binary.
+
+---
+
+## 24. No `MAX_BUY` means no negotiation
+
+**Problem.** The server only returns `MAX_BUY` for flagged tokens. If it is ever absent, we
+have a load we can pitch and no idea what we may pay for it.
+
+**Choice.** `CeilingUnavailable`, and the load goes to a human. The same applies to a ceiling
+too small to hold one increment under it.
+
+**Rejected.** Falling back to `RATE` as the ceiling (which would mean a negotiation with no
+room), or to some multiple of it (which would mean inventing the brokerage's limit).
+
+**Why.** Every number the engine produces is derived from the ceiling. Without one there is
+no defensible offer to make, and a made-up ceiling is worse than a missed load.
+
+---
+
+## 25. Qualification is a rule, and unknown authority age is Review
+
+**Problem.** Deciding whether a carrier we could not sell to is worth a human's time is a
+judgement call, and judgement calls are what language models are for — except that this one
+has to give the same answer twice.
+
+**Choice.** A pure function, evaluated in the documented order, with `Review` short-circuiting
+first. An authority age we could not read is treated as unqualified, not as old enough.
+
+**Rejected.** An LLM call, and treating a missing date as "probably fine".
+
+**Why.** Same inputs, same answer, and the answer is explainable to the rep who receives the
+lead. The safe direction for an unknown is to ask a human, and a brand-new authority is
+exactly who the 90-day rule is protecting against.
+
+---
+
+## 26. Events are a separate store from the conversation, and may contain the ceiling
+
+**Problem.** The audit trail wants the numbers the agent must never see. Putting both
+concerns in one payload means either leaking or losing the detail.
+
+**Choice.** The service records what it decided; the platform records what was said.
+`EventSink` has an in-memory and a JSONL implementation, and `{run_id, ts, type, payload}`
+events carry `ceiling` and `gap` freely. A test asserts no agent-facing response ever
+contains a ceiling value.
+
+**Rejected.** A single log that serves both, and stripping the numbers from the events out of
+caution.
+
+**Why.** The two have different audiences and different lifetimes; the conversation is the
+platform's to keep. Twin is deferred until its authentication is confirmed, rather than
+guessing a shape into every call site.
+
+---
+
+## 27. FMCSA fails closed on a missing field, not just on an outage
+
+**Problem.** The brief says fail closed on an outage. It says nothing about a 200 response
+that is missing `allowedToOperate` or `statusCode` — and with no real response recorded, that
+is the *likely* case, because our key names are guesses.
+
+**Choice.** A response whose signals we cannot read is `incomplete_response`: not eligible.
+A missing authority *date* is milder — the carrier is still eligible, but the age is `None`,
+which routes the lead to `Review`.
+
+**Rejected.** Treating unreadable flags as permissive, which would make the whole check
+decorative the moment a key name turns out to be wrong.
+
+**Why.** The failure mode of the strict version is visible and recoverable — carriers land in
+a human's queue with a logged reason. The failure mode of the permissive version is booking
+an out-of-service carrier because a field was spelled differently than we guessed.
+
+---
+
+## 28. The run-session store is in-memory and single-instance
+
+**Problem.** Session state is per-process. Two workers behind a load balancer would each hold
+half the calls, and a tool call that landed on the wrong one would look like a call that had
+never started.
+
+**Choice.** One process, one dictionary, with a TTL. Documented as a POC constraint, with
+`RunSessionStore` as the interface Redis will implement.
+
+**Rejected.** Reaching for Redis now, before there is a second worker to justify it.
+
+**Why.** A POC that is honest about its single-instance assumption is safer than one that
+implies horizontal scalability it does not have. The TTL is monotonic-clock based, so a
+wall-clock jump cannot expire a live call.

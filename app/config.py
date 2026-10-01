@@ -7,10 +7,11 @@ variable names.
 
 from __future__ import annotations
 
+from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,9 +48,27 @@ class Settings(BaseSettings):
     # --- FMCSA (phase 2) ------------------------------------------------
     fmcsa_base_url: str = "https://mobile.fmcsa.dot.gov/qc/services"
     fmcsa_key: SecretStr = SecretStr("")
+    fmcsa_timeout_seconds: float = 5.0
+
+    # --- OTP (phase 2) --------------------------------------------------
+    #: Key for the HMAC that protects stored codes. Generate with
+    #: `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+    otp_hmac_secret: SecretStr = SecretStr("")
+    otp_ttl_seconds: int = 300
+    otp_max_attempts: int = 3
+    otp_max_resends: int = 1
 
     # --- Negotiation (phase 2) ------------------------------------------
-    negotiation_steps: str = "0.40,0.75,1.00"
+    negotiation_steps: str = "0.40,0.75"
+    negotiation_urgent_steps: str = "0.60,0.90"
+    negotiation_max_rounds: int = 3
+    #: Offers are rounded down to this increment, and stay this far below the
+    #: ceiling so a concession is always possible.
+    negotiation_increment: int = 25
+    negotiation_ceiling_margin: int = 25
+
+    # --- Sessions (phase 2) ---------------------------------------------
+    run_session_ttl_seconds: int = 3600
 
     @property
     def tms_token_value(self) -> str:
@@ -57,13 +76,34 @@ class Settings(BaseSettings):
         return self.tms_token.get_secret_value()
 
     @property
-    def negotiation_steps_tuple(self) -> tuple[float, ...]:
-        """Concession steps parsed from the comma-separated env value."""
-        raw = [part.strip() for part in self.negotiation_steps.split(",")]
-        steps = tuple(float(part) for part in raw if part)
-        if not steps:
-            raise ValueError("NEGOTIATION_STEPS must contain at least one number")
-        return steps
+    def negotiation_steps_tuple(self) -> tuple[Fraction, ...]:
+        """Concession steps for a normal call."""
+        return _parse_fractions("NEGOTIATION_STEPS", self.negotiation_steps)
+
+    @property
+    def negotiation_urgent_steps_tuple(self) -> tuple[Fraction, ...]:
+        """Concession steps when the pickup is inside 24 hours."""
+        return _parse_fractions("NEGOTIATION_URGENT_STEPS", self.negotiation_urgent_steps)
+
+
+def _parse_fractions(name: str, raw: str) -> tuple[Fraction, ...]:
+    """Parse a comma-separated list of decimals into exact rationals.
+
+    `Fraction("0.40")` is 2/5 exactly. Going through `float` first would give
+    0.4000000000000000222..., and this is money: a step that lands a hair below
+    a multiple of 25 would silently lose a whole increment.
+    """
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts:
+        raise ValueError(f"{name} must contain at least one number")
+    try:
+        steps = tuple(Fraction(part) for part in parts)
+    except (ValueError, ZeroDivisionError) as exc:
+        raise ValueError(f"{name} must be a comma-separated list of numbers") from exc
+    for step in steps:
+        if not 0 < step <= 1:
+            raise ValueError(f"{name} entries must be between 0 and 1 exclusive")
+    return steps
 
 
 @lru_cache(maxsize=1)
