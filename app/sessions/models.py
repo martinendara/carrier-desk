@@ -136,7 +136,9 @@ class RunSession(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
-    #: The MC verified during this call, if any.
+    #: The MC this call is about. **Only `OtpService.send` sets this**, and the
+    #: routes that merely look a carrier up must not touch it: if a lookup could
+    #: move it, an OTP verified for one MC would authorise another.
     mc_number: str | None = None
     fmcsa_eligible: bool | None = None
 
@@ -176,6 +178,18 @@ class RunSession(BaseModel):
     def active_negotiation(self) -> NegotiationSession | None:
         for negotiation in reversed(self.negotiations):
             if negotiation.is_open:
+                return negotiation
+        return None
+
+    @property
+    def agreed_negotiation(self) -> NegotiationSession | None:
+        """The most recent negotiation that ended in an agreement.
+
+        This is what booking reads its rate from. The rate never travels through
+        the agent, so there is nothing for a caller to substitute.
+        """
+        for negotiation in reversed(self.negotiations):
+            if negotiation.outcome is NegotiationOutcome.ACCEPTED:
                 return negotiation
         return None
 

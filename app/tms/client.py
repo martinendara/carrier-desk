@@ -26,9 +26,11 @@ from collections.abc import Iterable
 from datetime import date, datetime, time as midnight
 from typing import Callable, Mapping, Sequence
 
+from app.deadline import Deadline
 from app.tms.models import BookResult, BookingStatus, Load, LoadDetail
 from app.tms.protocol import (
     MAX_FRAME_BYTES,
+    TmsBudgetExhausted,
     TmsError,
     TmsFault,
     TmsInvalidInput,
@@ -123,6 +125,7 @@ class TmsClient:
         connect_timeout: float = 3.0,
         read_deadline: float = 5.0,
         max_attempts: int = 3,
+        total_budget: float | None = None,
         backoff: Sequence[float] = DEFAULT_BACKOFF,
         jitter: float = DEFAULT_JITTER,
         sleep: Callable[[float], None] = time.sleep,
@@ -142,6 +145,9 @@ class TmsClient:
         self._connect_timeout = connect_timeout
         self._read_deadline = read_deadline
         self._max_attempts = max_attempts
+        #: Wall-clock ceiling for a whole command, retries included. None means
+        #: "rely on the per-attempt deadlines alone".
+        self._total_budget = total_budget
         self._backoff = tuple(backoff)
         self._jitter = jitter
         self._sleep = sleep
@@ -154,6 +160,7 @@ class TmsClient:
             "connect_timeout": settings.tms_connect_timeout_seconds,
             "read_deadline": settings.tms_read_deadline_seconds,
             "max_attempts": settings.tms_max_attempts,
+            "total_budget": settings.request_budget_seconds,
         }
         options.update(overrides)
         return cls(
@@ -172,6 +179,7 @@ class TmsClient:
         self,
         *,
         max_results: int | None = None,
+        deadline: Deadline | None = None,
         **filters: object,
     ) -> list[Load]:
         """Search loads by name, e.g. ``query_loads(ORIG_STATE="GA", max_results=5)``.
@@ -199,18 +207,25 @@ class TmsClient:
         if max_results is not None:
             fields["MAX_RESULTS"] = int(max_results)
 
-        records = self.execute(LOAD_QUERY, fields)
+        records = self.execute(LOAD_QUERY, fields, deadline=deadline)
         return [Load.from_record(record) for record in records]
 
-    def get_load(self, load_id: str) -> LoadDetail:
+    def get_load(self, load_id: str, *, deadline: Deadline | None = None) -> LoadDetail:
         """Fetch one load, including the fields reserved for a single lookup."""
         self._validate_load_id(load_id)
-        records = self.execute(LOAD_GET, {"LOAD_ID": load_id})
+        records = self.execute(LOAD_GET, {"LOAD_ID": load_id}, deadline=deadline)
         if not records:
             raise TmsMalformed(f"LOAD_GET for {load_id} returned no record")
         return LoadDetail.from_record(records[0])
 
-    def book_load(self, load_id: str, mc_number: str, agreed_rate: int) -> BookResult:
+    def book_load(
+        self,
+        load_id: str,
+        mc_number: str,
+        agreed_rate: int,
+        *,
+        deadline: Deadline | None = None,
+    ) -> BookResult:
         """Book a load. **Consumes the load permanently for this token.**
 
         There is no blind retry. If the attempt dies in transport we cannot
@@ -230,7 +245,7 @@ class TmsClient:
         ambiguous = False
 
         try:
-            lines = self._execute(LOAD_BOOK, fields, retryable=False)
+            lines = self._execute(LOAD_BOOK, fields, retryable=False, deadline=deadline)
         except TmsError as exc:
             # A well-formed rejection: the request reached a working server.
             if exc.code == "ALREADY_BOOKED":
@@ -241,19 +256,25 @@ class TmsClient:
                 return self._unconfirmed(load_id, ambiguous=False)
             raise
         except (TmsTimeout, TmsPartialResponse, TmsMalformed):
+            # Only these three mean the frame went out and we lost the answer.
+            # TmsBudgetExhausted is not here on purpose: it is raised before the
+            # attempt, so nothing was sent and there is nothing to resolve.
             ambiguous = True
             logger.warning("LOAD_BOOK for %s failed in transport; resolving via LOAD_GET", load_id)
-            return self._resolve_ambiguous_booking(load_id, fields)
+            return self._resolve_ambiguous_booking(load_id, fields, deadline)
 
         return self._parse_booking(lines, load_id=load_id, ambiguous=ambiguous)
 
     # --- Booking helpers ------------------------------------------------
 
     def _resolve_ambiguous_booking(
-        self, load_id: str, fields: Mapping[str, object]
+        self,
+        load_id: str,
+        fields: Mapping[str, object],
+        deadline: Deadline | None = None,
     ) -> BookResult:
         """Decide the outcome of a LOAD_BOOK whose response we never saw."""
-        load = self.get_load(load_id)  # idempotent: normal retry rules apply
+        load = self.get_load(load_id, deadline=deadline)  # idempotent: normal retries
 
         if not load.is_open:
             # The load left OPEN, and the only booking call in flight was ours.
@@ -262,7 +283,7 @@ class TmsClient:
         # Still open, so our attempt did not land. One more try, never a loop:
         # a second ambiguous outcome is handed to a human rather than retried.
         try:
-            lines = self._execute(LOAD_BOOK, fields, retryable=False)
+            lines = self._execute(LOAD_BOOK, fields, retryable=False, deadline=deadline)
         except TmsError as exc:
             if exc.code == "ALREADY_BOOKED":
                 return self._unconfirmed(load_id, ambiguous=True)
@@ -314,7 +335,11 @@ class TmsClient:
     # --- Request plumbing -----------------------------------------------
 
     def execute(
-        self, command: str, fields: Mapping[str, object] | None = None
+        self,
+        command: str,
+        fields: Mapping[str, object] | None = None,
+        *,
+        deadline: Deadline | None = None,
     ) -> list[dict[str, str]]:
         """Send a command and return parsed records, retrying if it is safe.
 
@@ -322,7 +347,7 @@ class TmsClient:
         and it never comes through here with retries enabled.
         """
         retryable = command in IDEMPOTENT_COMMANDS
-        return self._execute(command, fields, retryable=retryable)
+        return self._execute(command, fields, retryable=retryable, deadline=deadline)
 
     def _execute(
         self,
@@ -330,17 +355,36 @@ class TmsClient:
         fields: Mapping[str, object] | None,
         *,
         retryable: bool,
+        deadline: Deadline | None = None,
     ) -> list[dict[str, str]]:
+        # A caller-supplied deadline spans the whole HTTP request and is shared
+        # across commands; otherwise one is started for this command alone.
+        budget = deadline
+        if budget is None and self._total_budget:
+            budget = Deadline(self._total_budget)
+
         attempts = self._max_attempts if retryable else 1
         last_fault: TmsFault | None = None
 
         for attempt in range(1, attempts + 1):
+            if budget is not None and budget.expired:
+                # Out of the caller's time before the frame went out. Nothing
+                # happened on the server, so this is not an ambiguous outcome.
+                raise TmsBudgetExhausted(f"no time left to send {command}")
+
             started = time.monotonic()
             try:
-                lines = self._one_attempt(command, fields)
+                lines = self._one_attempt(command, fields, budget)
             except TmsFault as fault:
                 last_fault = fault
-                retrying = self._is_retryable(fault) and attempt < attempts
+                wants_retry = self._is_retryable(fault) and attempt < attempts
+                delay = self._next_delay(attempt) if wants_retry else 0.0
+                # The time budget, not the retry policy, is what stops us here:
+                # sleeping would spend time the caller does not have on a retry
+                # that could not finish anyway.
+                out_of_time = wants_retry and budget is not None and not budget.allows(delay)
+                retrying = wants_retry and not out_of_time
+
                 logger.warning(
                     "tms %s attempt %d/%d %s in %.3fs%s",
                     command,
@@ -350,9 +394,16 @@ class TmsClient:
                     time.monotonic() - started,
                     " - retrying" if retrying else "",
                 )
+                if out_of_time:
+                    # Reported as a budget failure rather than the underlying
+                    # timeout: the caller needs to know the request ran out of
+                    # its own clock, which is a different (and retryable) thing.
+                    raise TmsBudgetExhausted(
+                        f"time budget exhausted during {command}"
+                    ) from fault
                 if not retrying:
                     raise
-                self._sleep(self._next_delay(attempt))
+                self._sleep(delay)
                 continue
 
             logger.info(
@@ -369,7 +420,10 @@ class TmsClient:
         raise last_fault
 
     def _one_attempt(
-        self, command: str, fields: Mapping[str, object] | None
+        self,
+        command: str,
+        fields: Mapping[str, object] | None,
+        deadline: Deadline | None = None,
     ) -> list[dict[str, str]]:
         """One request over one connection. Raises a :class:`TmsFault` subclass."""
         frame = encode_request(command, self._token, fields)
@@ -378,7 +432,7 @@ class TmsClient:
                 (self._host, self._port), timeout=self._connect_timeout
             ) as sock:
                 sock.sendall(frame)
-                lines = self._read_response(sock)
+                lines = self._read_response(sock, deadline)
         except TimeoutError as exc:
             # Covers both the connect timeout and a recv that lost the race
             # with our own deadline handling below.
@@ -393,9 +447,16 @@ class TmsClient:
         # retryable condition for an idempotent command.
         return parse_response(lines)
 
-    def _read_response(self, sock: socket.socket) -> list[str]:
-        """Read until ``END``/``ERR``, then stop. The caller closes the socket."""
-        deadline = time.monotonic() + self._read_deadline
+    def _read_response(self, sock: socket.socket, budget: Deadline | None = None) -> list[str]:
+        """Read until ``END``/``ERR``, then stop. The caller closes the socket.
+
+        The per-attempt read deadline is clamped to whatever is left of the
+        request budget: an attempt must never outlive the caller's time.
+        """
+        window = self._read_deadline
+        if budget is not None:
+            window = min(window, budget.remaining)
+        deadline = time.monotonic() + window
         buffer = b""
         lines: list[str] = []
 
@@ -469,6 +530,9 @@ class TmsClient:
     def _is_retryable(fault: TmsFault) -> bool:
         if isinstance(fault, TmsInvalidInput):
             # Our own bug, not the network's. Retrying would repeat it.
+            return False
+        if isinstance(fault, TmsBudgetExhausted):
+            # There is no time to retry; `_execute` already checked.
             return False
         if isinstance(fault, TmsError):
             return is_retryable_error_code(fault.code)

@@ -201,3 +201,121 @@ string can be read out loud by the agent, so the filter now also requires ASCII.
 ### Not started
 
 Phase 3 (HTTP API, auth, gating) and phase 4 (Docker, deployment).
+
+---
+
+## Phase 3 — HTTP API and auth (2026-10-01)
+
+**Status:** complete and tested. The service runs, the full call works end to end against
+the in-process fake TMS, and the README's curl examples were executed against a local
+server rather than written from memory.
+
+### What was built
+
+| Module | Purpose |
+|---|---|
+| `app/main.py` | `create_app()` factory, `/health`, router assembly, error handlers |
+| `app/security.py` | `X-API-Key` dependency, constant-time compare, refuses everything when unconfigured |
+| `app/api/deps.py` | container access, the per-request `Deadline`, `require_verified` |
+| `app/api/schemas.py` | request/response models, `extra="forbid"` on every request |
+| `app/api/errors.py` | domain exception → `{error, say}`, one handler per exception base |
+| `app/api/phrasing.py` | every line the agent might say, in one auditable file |
+| `app/api/routes/` | carriers, otp, loads, negotiations, bookings + handoff |
+| `app/container.py` | constructs the service from `Settings`, including the fake TMS |
+| `app/deadline.py` | the per-request time budget |
+| `app/handoff/` | mocked senior-rep queue |
+| `app/tms/fake_server.py` | moved out of `tests/` so `TMS_MODE=fake` can run it in-process |
+
+The `run_id` contract holds throughout: no request accepts an `otp_session_id`, a
+`negotiation_id` or a round number, and sending one is a 422 because every request model
+sets `extra="forbid"`.
+
+### Tests
+
+```
+395 passed in 5.65s
+```
+
+`tests/test_api.py` adds 60. The ones that matter most:
+
+- **`test_every_route_that_needs_otp_is_gated`** walks the app's own route table and
+  asserts every non-exempt route answers 403 to an unverified call. A route added later
+  fails this test rather than shipping unauthenticated. (Getting this test to actually see
+  the routes took two fixes: FastAPI no longer flattens included routers, so it recurses
+  through `original_router`.)
+- **`test_no_load_response_ever_contains_max_buy`** serialises the whole search and detail
+  response and checks the ceiling is absent as a key or a value.
+- **`test_the_agent_facing_fields_never_carry_the_code`** and
+  `test_the_full_address_is_never_in_the_spoken_line` pin the OTP split.
+- **`test_a_tms_fault_becomes_a_speakable_error`** asserts the response body contains no
+  error code, host, command name or traceback.
+- **`test_a_slow_tms_is_cut_off_by_the_budget`** proves the request budget stops the retry
+  ladder and reports itself.
+- Bookings: confirmed → `booked`; lost response that landed → `booking_pending` with no
+  reference, never `booked`; `ALREADY_BOOKED` → `booking_pending`; a rate in the body → 422.
+
+### Bugs found by the tests, and fixed
+
+1. **`to_api_error` never reached the routes.** The generic `Exception` handler is
+   re-raised by Starlette, so every domain failure surfaced as a stack trace instead of a
+   sentence. Handlers are now registered per exception base.
+2. **`TmsInvalidInput` was mapped to 502.** It is a `TmsFault`, and the `TmsFault` check
+   came first — so our own bad request reported as a broken upstream. Order fixed and
+   commented, because it will be re-broken by an innocent reordering.
+3. **Running out of budget reported as a plain timeout.** The budget did stop the retries,
+   but the error that surfaced was the first attempt's `TmsTimeout`. `_execute` now
+   distinguishes "the budget is what stopped us" and raises `TmsBudgetExhausted` (504).
+4. The fake TMS bound its port twice when `start_fake_tms()` was wrapped in `with`; `start`
+   is now idempotent.
+
+### Verified end to end
+
+The README's curl sequence was run against a local uvicorn (loopback only) with
+`TMS_MODE=fake`: health → verify → OTP send → verify → search (3 loads, no `MAX_BUY`
+anywhere) → detail → open at 5125 → counter → accept at 5525 → booked with a reference →
+handoff. Two amounts in the README had been written from memory and were wrong; they are
+now the values that actually came back.
+
+FMCSA from this machine returns the fail-closed answer, which is what the README documents
+for a non-US region.
+
+### Deliberate readings, recorded in DECISIONS.md
+
+- **Load detail is gated too** (§30), though §8 does not list it: pitching freight to an
+  unverified caller is what verification is for.
+- **Fetching detail does not count as showing a load** (§31): otherwise "negotiate what you
+  were shown" becomes "negotiate anything you can name".
+- **`/handoff` is not gated** — it is the escape hatch for a carrier who can never verify,
+  and gating it would make "route this to a human" a dead end.
+- **A booking with no agreed rate is a 409, not a 403**: the carrier did nothing wrong.
+
+### Open issues
+
+Carried over from phases 1 and 2, still true:
+
+1. **TMS token rejected** — no live load has ever been fetched.
+2. **Every FMCSA field name is `TODO: verify`**; the fixtures are synthetic.
+3. **FMCSA has never been called successfully** from here.
+4. **OTP delivery is not wired to the platform.** The two views are returned in separate
+   fields; mapping `delivery` into a hidden Tool Call Result field is the platform's step.
+   Now confirmed possible by the platform docs, still unverified in the platform itself.
+
+New in phase 3:
+
+5. **Sessions and the handoff queue are per-process.** A second worker would not see the
+   first one's calls. Redis behind `RunSessionStore` is the production path; the handoff
+   queue has the same problem and the same answer.
+6. **`/handoff` is the only durable record of a handoff.** The queue is in memory, so the
+   `handoff_created` event is what survives a restart.
+7. **No rate limiting on `/otp/verify`.** The per-call lock is three attempts, but a caller
+   can start a new call (`run_id`) and try again. A per-MC limit needs shared state.
+8. **`TMS_MODE=fake` is a development switch with no guard.** It is read from the
+   environment like everything else; nothing stops it being set in a deployment, where it
+   would serve fixture loads to real carriers.
+9. **The search response shape for the agent is a list of full records.** Three loads is
+   fine to speak, but the pitch text is assembled in the route, and it is the only place
+   in the API where phrasing is built from data rather than fixed.
+
+### Not started
+
+Phase 4: Docker, docker-compose, deployment to a US region, live FMCSA verification.

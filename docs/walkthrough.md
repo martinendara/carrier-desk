@@ -6,8 +6,7 @@ real call takes.
 - **Sections 1–12: phase 1**, the TMS adapter — four small files under `app/tms/`, plus a
   fake server in `tests/`.
 - **Sections 13–21: phase 2**, verification, OTP, negotiation, onboarding and events.
-
-There is still no HTTP API; that is phase 3.
+- **Sections 22–29: phase 3**, the HTTP API, the verification gate and the error surface.
 
 ```
 settings ─▶ TmsClient.query_loads ─▶ encode_request ─▶ socket ─▶ _read_response
@@ -393,3 +392,142 @@ Events **may** contain the ceiling, because they are internal and never travel b
 agent. That is the whole reason `test_call_flow.py` exists: it walks a complete call, gathers
 every agent-facing value, and asserts the ceiling is not among them — as a number or as a
 key name — while the event log has it.
+
+---
+
+# Phase 3 — the HTTP surface
+
+```
+POST /…  ─▶ X-API-Key ─▶ route ─▶ require_verified ─▶ service ─▶ agent view
+                             │                          │
+                        Deadline (8 s)              EventSink
+```
+
+---
+
+## 22. `app/main.py` — the factory
+
+`create_app(settings)` builds the container, installs the error handlers, mounts the router
+behind the API key, and defines `/health` directly on the app so it stays unauthenticated.
+
+There is deliberately **no** module-level `app`. Building the container reads configuration
+that must fail loudly when it is wrong, and doing that at import time would make this module
+unimportable in exactly the situation where you want to import it and read the error. Hence
+`uvicorn --factory app.main:create_app`.
+
+---
+
+## 23. `app/security.py` — one key, compared in constant time
+
+`build_api_key_dependency(key)` returns the dependency that every tool route is mounted
+behind. Two details:
+
+- `hmac.compare_digest`, so the key cannot be recovered by timing a series of guesses.
+- An **unconfigured** key refuses every request rather than allowing them. A guard that
+  opens when it is not set is not a guard.
+
+The 401 says nothing about whether the header was missing or wrong; an unauthenticated
+caller does not need to know which.
+
+---
+
+## 24. `app/container.py` — the wiring, and the TMS mode switch
+
+One place where the store, the event sink, the TMS client, the OTP service, the negotiation
+engine, the FMCSA client and the handoff queue are constructed from `Settings`. The route
+handlers stay about the conversation.
+
+`TMS_MODE=fake` is the switch the platform's workflow tests need: the service starts the
+fixture-replaying TCP server from `app/tms/fake_server.py` on a loopback port and points
+the **ordinary** `TmsClient` at it. Same socket code, same deadlines, same framing, same
+retry policy — only the data is canned. A stub client returning objects would skip exactly
+the code that is riskiest.
+
+`EVENTS_JSONL_PATH=memory` swaps the event sink for the in-memory one, which is what the
+tests use and what a demo can read back.
+
+---
+
+## 25. `app/deadline.py` — a budget for the whole request
+
+A voice tool that hangs is a dropped call, and the platform's webhook timeout is not
+documented. One `Deadline` is created per request and threaded into every TMS call the
+request makes — so a booking that takes three TMS round trips still fits inside one budget.
+
+The client spends it two ways: an attempt's read window is clamped to what is left, and a
+retry is skipped when its backoff would not fit. When the budget is what stopped the retry,
+the failure is reported as `TmsBudgetExhausted` (504) rather than as the underlying timeout
+— because that is the one failure here the platform can usefully retry.
+
+---
+
+## 26. `app/api/deps.py` — the gate
+
+`require_verified(session)` is called explicitly by each gated handler. It is not a FastAPI
+dependency because every gated route takes a different request body, and a dependency would
+have to re-declare it — FastAPI would then see two body parameters.
+
+What makes that safe is a test rather than a mechanism:
+`test_every_route_that_needs_otp_is_gated` walks the app's own route table and asserts that
+every route outside a short exception list answers 403 to an unverified call. A route added
+later fails the test instead of shipping open.
+
+The exception list is short and each entry has a reason: `/health` (liveness),
+`/carriers/verify` and `/otp/*` (they happen before there is anything to verify), and
+`/handoff` — which is the escape hatch for a carrier who can never verify, so gating it
+would turn "route this to a human" into a dead end.
+
+---
+
+## 27. `app/api/routes/` — what each endpoint does
+
+**`carriers.py`** looks the MC up and maps each way FMCSA can refuse onto a sentence. It
+deliberately does *not* touch `session.mc_number`: that field is what binds a verified OTP
+to an MC, and only `OtpService.send` may set it.
+
+**`otp.py`** returns the two views in separate, described fields — `masked_destination` for
+the agent, `delivery: {destination, code}` for the platform's send node. The spoken line
+never contains either the code or the full address.
+
+**`loads.py`** has the search and the detail. Search is where loads are recorded as *shown*,
+which is what makes them negotiable; the detail fetch deliberately does **not** record,
+because otherwise "negotiate what you were shown" would collapse into "negotiate anything
+you can name", and load ids are guessable. Every load goes out through `public_dict()`.
+
+**`negotiations.py`** fetches the load server-side so `MAX_BUY` exists only inside this
+process, opens the negotiation, and answers each carrier request with `{action, amount}`.
+The round counter lives on the server, so a caller cannot skip a round.
+
+**`bookings.py`** reads the agreed rate out of the session — there is no rate field in the
+request, so there is nothing to substitute — and returns `booked` only when the reference
+came back. Anything uncertain is `booking_pending`. The handoff endpoint lives here too and
+puts a ticket in the in-memory queue with a summary a rep can act on.
+
+---
+
+## 28. `app/api/errors.py` and `app/api/phrasing.py` — two audiences
+
+`phrasing.py` holds every line the agent might say. It is one file so it can be read in one
+sitting and checked for the thing that matters: none of it describes anything internal.
+
+`errors.py` maps each domain exception onto a status code, a machine code and one of those
+sentences. Handlers are registered per **base** class (`TmsFault`, `SessionError`,
+`NegotiationError`, `McValidationError`, `ValueError`), so a new exception type added under
+one of them is mapped automatically instead of escaping as a stack trace — which is exactly
+what happened the first time, because Starlette re-raises whatever reaches the generic
+`Exception` handler.
+
+The detail goes to the log. The response gets a sentence.
+
+---
+
+## 29. `app/tms/fake_server.py` — now shared with development
+
+Moved out of `tests/` when `TMS_MODE=fake` needed it. It replays the recorded fixtures,
+injects the five fault modes, and returns `ALREADY_BOOKED` / `INVALID_RATE` on demand.
+
+One addition for the development role: it synthesises a `LOAD_GET` record for the loads the
+fixture only captured as `LOAD_QUERY` lines, including a `MAX_BUY` above the posted rate.
+Without that you could search and not negotiate, which is the only thing the fake is for.
+The invented fields are labelled as such in the module — nothing about them claims to match
+the live server.

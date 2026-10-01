@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     )
 
     # --- Legacy TMS -----------------------------------------------------
+    #: `live` talks to TMS_HOST; `fake` starts the in-process server from
+    #: app/tms/fake_server.py, seeded from the recorded fixtures. Development
+    #: only: the platform's workflow tests fire real webhooks, and they must be
+    #: able to run a whole call without spending live loads.
+    tms_mode: str = "live"
     tms_host: str = ""
     tms_port: int = 0
     # SecretStr keeps the token out of reprs, logs and tracebacks by accident.
@@ -41,6 +46,12 @@ class Settings(BaseSettings):
     tms_connect_timeout_seconds: float = 3.0
     tms_read_deadline_seconds: float = 5.0
     tms_max_attempts: int = 3
+    #: Token presented to the in-process fake. Never a real credential.
+    tms_fake_token: str = "fake-token"
+
+    #: Wall-clock ceiling for one HTTP request, retries included. The platform's
+    #: webhook timeout is undocumented, so we pick our own and stay under it.
+    request_budget_seconds: float = 8.0
 
     # --- carrier-desk HTTP API (phase 3) --------------------------------
     service_api_key: SecretStr = SecretStr("")
@@ -69,6 +80,12 @@ class Settings(BaseSettings):
 
     # --- Sessions (phase 2) ---------------------------------------------
     run_session_ttl_seconds: int = 3600
+
+    # --- Events (phase 3) -----------------------------------------------
+    #: Where the JSONL event log is written. Relative paths resolve from the
+    #: repository root. The literal "memory" keeps events in the process, which
+    #: is what the tests use.
+    events_jsonl_path: str = "var/events.jsonl"
 
     @property
     def tms_token_value(self) -> str:

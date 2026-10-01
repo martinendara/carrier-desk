@@ -1,0 +1,828 @@
+"""HTTP API tests.
+
+The app is built the same way production builds it — `create_app(settings)` —
+with `TMS_MODE=fake` so every test drives the real client, the real socket code
+and the real framing against a server in this process. Nothing here reaches the
+live TMS.
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+
+import httpx
+import pytest
+from conftest import NOW, load_fmcsa_fixture
+from fastapi.testclient import TestClient
+
+from app.config import Settings
+from app.fmcsa import FmcsaClient
+from app.main import create_app
+from app.tms.fake_server import BOOK_ALREADY, PARTIAL, TIMEOUT
+
+API_KEY = "test-api-key"
+SECRET = "test-secret-that-is-long-enough!!"
+HEADERS = {"X-API-Key": API_KEY}
+
+#: An MC that has a contact on file, and one that does not.
+KNOWN_MC = "123456"
+UNKNOWN_MC = "999999"
+
+
+def fmcsa_returning(fixture: str) -> FmcsaClient:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=load_fmcsa_fixture(fixture))
+    )
+    return FmcsaClient(
+        "https://fmcsa.test", "key", client=httpx.Client(transport=transport), clock=lambda: NOW.date()
+    )
+
+
+@contextmanager
+def api_app(**overrides):
+    """A running app, its TestClient, and its container."""
+    options = {
+        "tms_mode": "fake",
+        "service_api_key": API_KEY,
+        "otp_hmac_secret": SECRET,
+        "events_jsonl_path": "memory",
+        "request_budget_seconds": 5.0,
+    }
+    options.update(overrides)
+    app = create_app(Settings(**options))
+    container = app.state.container
+    # FMCSA blocks Argentina, so the real client cannot be used here. Swapping
+    # it is the only seam these tests need.
+    container.fmcsa = fmcsa_returning("carrier_eligible")
+    client = TestClient(app)
+    try:
+        yield client, container
+    finally:
+        container.close()
+
+
+@pytest.fixture
+def api():
+    with api_app() as (client, container):
+        yield client, container
+
+
+# --- helpers ------------------------------------------------------------
+
+
+def verify_carrier(client, run_id: str, mc: str = KNOWN_MC) -> dict:
+    response = client.post(
+        "/carriers/verify", json={"run_id": run_id, "mc_number": mc}, headers=HEADERS
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def become_verified(client, run_id: str, mc: str = KNOWN_MC) -> str:
+    """Run the carrier through OTP and return the plaintext code from delivery."""
+    verify_carrier(client, run_id, mc)
+    sent = client.post("/otp/send", json={"run_id": run_id, "mc_number": mc}, headers=HEADERS)
+    assert sent.status_code == 200, sent.text
+    code = sent.json()["delivery"]["code"]
+
+    checked = client.post(
+        "/otp/verify", json={"run_id": run_id, "code": code}, headers=HEADERS
+    )
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["verified"] is True
+    return code
+
+
+def search(client, run_id: str, **filters) -> dict:
+    response = client.post(
+        "/loads/search", json={"run_id": run_id, **filters}, headers=HEADERS
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+# --- health and auth ----------------------------------------------------
+
+
+def test_health_needs_no_auth(api):
+    client, _ = api
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_health_says_nothing_about_configuration(api):
+    client, _ = api
+
+    assert "fake" not in json.dumps(client.get("/health").json())
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("post", "/carriers/verify", {"run_id": "r", "mc_number": "123456"}),
+        ("post", "/otp/send", {"run_id": "r", "mc_number": "123456"}),
+        ("post", "/otp/verify", {"run_id": "r", "code": "000000"}),
+        ("post", "/loads/search", {"run_id": "r"}),
+        ("get", "/loads/LD00896", None),
+        ("post", "/negotiations", {"run_id": "r", "load_id": "LD00896"}),
+        ("post", "/negotiations/counter", {"run_id": "r", "carrier_ask": 2000}),
+        ("post", "/bookings", {"run_id": "r"}),
+        ("post", "/handoff", {"run_id": "r"}),
+    ],
+)
+def test_every_tool_requires_the_api_key(api, method, path, body):
+    client, _ = api
+
+    if method == "get":
+        response = client.get(path, params={"run_id": "r"})
+    else:
+        response = client.post(path, json=body)
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+
+
+def test_a_wrong_api_key_is_refused(api):
+    client, _ = api
+
+    response = client.post(
+        "/carriers/verify",
+        json={"run_id": "r", "mc_number": "123456"},
+        headers={"X-API-Key": "not-the-key"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_an_unconfigured_key_refuses_everything():
+    with api_app(service_api_key="") as (client, _):
+        response = client.post(
+            "/carriers/verify", json={"run_id": "r", "mc_number": "123456"}, headers=HEADERS
+        )
+
+    assert response.status_code == 503
+
+
+# --- run_id is mandatory ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path", ["/carriers/verify", "/otp/send", "/otp/verify", "/loads/search", "/bookings"]
+)
+def test_run_id_is_required(api, path):
+    client, _ = api
+
+    response = client.post(path, json={}, headers=HEADERS)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
+
+
+def test_an_agent_cannot_smuggle_an_id_field(api):
+    """`extra="forbid"`: the ids the agent must never carry are rejected, not ignored."""
+    client, _ = api
+
+    response = client.post(
+        "/negotiations/counter",
+        json={"run_id": "r", "carrier_ask": 2000, "negotiation_id": "neg-1", "round": 2},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 422
+
+
+# --- gating -------------------------------------------------------------
+
+
+#: Endpoints that must work before an OTP exists: verification itself, and the
+#: handoff, which is the escape hatch for a carrier who can never verify.
+UNVERIFIED_OK = {"/health", "/carriers/verify", "/otp/send", "/otp/verify", "/handoff"}
+
+#: Minimal valid bodies, so a route reaches its gate instead of failing
+#: validation first. A new route must be added here, which is what makes this
+#: test notice it.
+GATED_ROUTES = {
+    ("POST", "/loads/search"): {"run_id": "gate"},
+    ("POST", "/negotiations"): {"run_id": "gate", "load_id": "LD00896"},
+    ("POST", "/negotiations/counter"): {"run_id": "gate", "carrier_ask": 2000},
+    ("POST", "/bookings"): {"run_id": "gate"},
+    ("GET", "/loads/{load_id}"): None,
+}
+
+
+def _is_builtin(path: str) -> bool:
+    """FastAPI's own docs and schema routes, which are not ours to gate."""
+    return path.startswith(("/docs", "/redoc", "/openapi"))
+
+
+def _walk_routes(routes):
+    """Every leaf route.
+
+    FastAPI does not flatten an included router into the parent's `routes`; it
+    keeps a wrapper around the original router. Recursing through both shapes is
+    what makes this test see the endpoints that actually exist — otherwise it
+    would pass by finding nothing, which is the worst way for a test like this
+    to be wrong.
+    """
+    for route in routes:
+        nested = getattr(route, "routes", None)
+        if not nested:
+            original = getattr(route, "original_router", None)
+            nested = getattr(original, "routes", None) if original is not None else None
+        if nested:
+            yield from _walk_routes(nested)
+        else:
+            yield route
+
+
+def test_every_route_that_needs_otp_is_gated(api):
+    """Walks the app's own route table.
+
+    A route added later and not listed below fails this test rather than
+    quietly shipping unauthenticated.
+    """
+    client, _ = api
+
+    seen = set()
+    for route in _walk_routes(client.app.routes):
+        methods = getattr(route, "methods", set()) or set()
+        path = getattr(route, "path", "")
+        if not methods or path in UNVERIFIED_OK or _is_builtin(path):
+            continue
+        for method in methods:
+            key = (method, path)
+            seen.add(key)
+            body = GATED_ROUTES.get(key)
+            if method == "GET":
+                response = client.get(
+                    path.replace("{load_id}", "LD00896"),
+                    params={"run_id": "gate-1"},
+                    headers=HEADERS,
+                )
+            else:
+                response = client.post(path, json=body, headers=HEADERS)
+            assert response.status_code == 403, f"{method} {path} -> {response.status_code}"
+            assert response.json()["error"] == "not_verified"
+
+    assert seen == set(GATED_ROUTES), f"route table changed: {seen ^ set(GATED_ROUTES)}"
+
+
+def test_a_carrier_that_has_not_verified_cannot_search(api):
+    client, _ = api
+
+    response = client.post("/loads/search", json={"run_id": "r-gate"}, headers=HEADERS)
+
+    assert response.status_code == 403
+    assert "say" in response.json()
+
+
+def test_the_gate_opens_once_the_code_is_verified(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    assert search(client, "run-1", equipment="DRY_VAN")["count"] > 0
+
+
+def test_a_failed_otp_leaves_the_call_unverified(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+    client.post("/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS)
+
+    client.post("/otp/verify", json={"run_id": "run-1", "code": "000000"}, headers=HEADERS)
+    response = client.post("/loads/search", json={"run_id": "run-1"}, headers=HEADERS)
+
+    assert response.status_code == 403
+
+
+# --- carrier verification -----------------------------------------------
+
+
+def test_an_eligible_carrier(api):
+    client, _ = api
+
+    body = verify_carrier(client, "run-1")
+
+    assert body["eligible"] is True
+    assert body["legal_name"] == "RIDGELINE FREIGHT LLC"
+    assert body["result_code"] is None
+    assert body["say"]
+
+
+def test_a_rejected_carrier_carries_the_reason_code_not_the_detail(api):
+    client, container = api
+    container.fmcsa = fmcsa_returning("carrier_out_of_service")
+
+    response = client.post(
+        "/carriers/verify", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["eligible"] is False
+    assert body["result_code"] == "fmcsa_rejected:out_of_service"
+    assert "out of service" in body["say"].lower()
+
+
+def test_a_bad_mc_is_refused_before_any_lookup(api):
+    client, _ = api
+
+    response = client.post(
+        "/carriers/verify", json={"run_id": "run-1", "mc_number": "MC-123"}, headers=HEADERS
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_mc"
+
+
+# --- OTP ----------------------------------------------------------------
+
+
+def test_send_returns_the_two_views_in_separate_fields(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+
+    body = client.post(
+        "/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+    ).json()
+
+    assert body["status"] == "sent"
+    # Agent-facing: masked only.
+    assert body["masked_destination"].startswith("d***@")
+    assert body["delivery"]["code"] not in json.dumps(body["masked_destination"])
+    # Platform-only: the code and the full address.
+    assert len(body["delivery"]["code"]) == 6
+    assert "@" in body["delivery"]["destination"]
+
+
+def test_the_agent_facing_fields_never_carry_the_code(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+
+    body = client.post(
+        "/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+    ).json()
+
+    agent_facing = {k: v for k, v in body.items() if k != "delivery"}
+    assert body["delivery"]["code"] not in json.dumps(agent_facing)
+    assert body["delivery"]["destination"] not in json.dumps(agent_facing)
+
+
+def test_the_full_address_is_never_in_the_spoken_line(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+
+    body = client.post(
+        "/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+    ).json()
+
+    assert body["delivery"]["destination"] not in body["say"]
+    assert body["delivery"]["code"] not in body["say"]
+
+
+def test_an_mc_with_no_contact_is_routed_to_onboarding(api):
+    client, _ = api
+    verify_carrier(client, "run-1", UNKNOWN_MC)
+
+    body = client.post(
+        "/otp/send", json={"run_id": "run-1", "mc_number": UNKNOWN_MC}, headers=HEADERS
+    ).json()
+
+    assert body["status"] == "routed_onboarding"
+    assert body["delivery"] is None
+    assert body["result_code"] == "routed_onboarding"
+
+
+def test_a_wrong_code_reports_attempts_left(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+    client.post("/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS)
+
+    body = client.post(
+        "/otp/verify", json={"run_id": "run-1", "code": "000000"}, headers=HEADERS
+    ).json()
+
+    assert body["verified"] is False
+    assert body["attempts_left"] == 2
+    assert body["result_code"] == "otp_failed"
+
+
+def test_three_wrong_codes_lock_the_call(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+    client.post("/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS)
+
+    body = {}
+    for _ in range(3):
+        body = client.post(
+            "/otp/verify", json={"run_id": "run-1", "code": "000000"}, headers=HEADERS
+        ).json()
+
+    assert body["verified"] is False
+    assert body["attempts_left"] == 0
+
+
+def test_verifying_without_a_challenge_does_not_leak(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+
+    body = client.post(
+        "/otp/verify", json={"run_id": "run-1", "code": "123456"}, headers=HEADERS
+    ).json()
+
+    assert body["verified"] is False
+
+
+# --- loads --------------------------------------------------------------
+
+
+def test_search_returns_at_most_three_loads(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="DRY_VAN")
+
+    assert body["count"] == 3
+    assert len(body["loads"]) == 3
+
+
+def test_no_load_response_ever_contains_max_buy(api):
+    """The whole response, serialised, must not carry the ceiling."""
+    client, _ = api
+    become_verified(client, "run-1")
+
+    search_body = search(client, "run-1", equipment="DRY_VAN")
+    load_id = search_body["loads"][0]["load_id"]
+    detail = client.get(
+        f"/loads/{load_id}", params={"run_id": "run-1"}, headers=HEADERS
+    ).json()
+
+    for body in (search_body, detail):
+        text = json.dumps(body)
+        assert "max_buy" not in text.lower()
+        assert "MAX_BUY" not in text
+
+
+def test_search_with_no_matches_says_so(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="FLATBED")
+
+    assert body["count"] == 0
+    assert body["loads"] == []
+    assert body["result_code"] == "no_match"
+
+
+def test_search_without_filters_is_a_speakable_error(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    response = client.post("/loads/search", json={"run_id": "run-1"}, headers=HEADERS)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
+
+
+def test_load_detail_pitches_the_load(api):
+    client, _ = api
+    become_verified(client, "run-1")
+    load_id = search(client, "run-1", equipment="DRY_VAN")["loads"][0]["load_id"]
+
+    body = client.get(f"/loads/{load_id}", params={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert body["load"]["load_id"] == load_id
+    assert body["say"]
+
+
+# --- negotiation --------------------------------------------------------
+
+
+def _negotiable_load(client, run_id: str = "run-1") -> str:
+    become_verified(client, run_id)
+    return search(client, run_id, equipment="DRY_VAN")["loads"][0]["load_id"]
+
+
+def test_opening_a_negotiation_returns_an_offer(api):
+    client, _ = api
+    load_id = _negotiable_load(client)
+
+    body = client.post(
+        "/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS
+    ).json()
+
+    assert body["load_id"] == load_id
+    assert body["offer"] > 0
+    assert "say" in body
+
+
+def test_a_load_that_was_never_shown_cannot_be_negotiated(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    response = client.post(
+        "/negotiations", json={"run_id": "run-1", "load_id": "LD00896"}, headers=HEADERS
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "load_not_shown"
+
+
+def test_negotiating_costs_one_of_the_two_slots(api):
+    client, _ = api
+    become_verified(client, "run-1")
+    loads = search(client, "run-1", equipment="DRY_VAN")["loads"]
+
+    for load in loads[:2]:
+        response = client.post(
+            "/negotiations", json={"run_id": "run-1", "load_id": load["load_id"]}, headers=HEADERS
+        )
+        assert response.status_code == 200
+
+    third = client.post(
+        "/negotiations", json={"run_id": "run-1", "load_id": loads[2]["load_id"]}, headers=HEADERS
+    )
+    assert third.status_code == 409
+    assert third.json()["error"] == "negotiation_limit"
+
+
+def test_a_counter_returns_only_an_action_and_an_amount(api):
+    client, _ = api
+    load_id = _negotiable_load(client)
+    client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
+
+    body = client.post(
+        "/negotiations/counter", json={"run_id": "run-1", "carrier_ask": 99999}, headers=HEADERS
+    ).json()
+
+    assert set(body) == {"action", "amount", "say"}
+    assert body["action"] in {"accept", "counter", "close"}
+
+
+def test_three_rounds_end_the_negotiation(api):
+    client, _ = api
+    load_id = _negotiable_load(client)
+    client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
+
+    actions = []
+    for _ in range(3):
+        body = client.post(
+            "/negotiations/counter",
+            json={"run_id": "run-1", "carrier_ask": 99999},
+            headers=HEADERS,
+        ).json()
+        actions.append(body["action"])
+
+    assert actions == ["counter", "counter", "close"]
+
+
+def test_a_fourth_round_is_refused(api):
+    client, _ = api
+    load_id = _negotiable_load(client)
+    client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
+    for _ in range(3):
+        client.post(
+            "/negotiations/counter",
+            json={"run_id": "run-1", "carrier_ask": 99999},
+            headers=HEADERS,
+        )
+
+    response = client.post(
+        "/negotiations/counter", json={"run_id": "run-1", "carrier_ask": 2500}, headers=HEADERS
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "negotiation_closed"
+
+
+def test_countering_without_an_offer_is_refused(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    response = client.post(
+        "/negotiations/counter", json={"run_id": "run-1", "carrier_ask": 2500}, headers=HEADERS
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "no_negotiation"
+
+
+def test_a_nonsense_ask_is_refused(api):
+    client, _ = api
+    load_id = _negotiable_load(client)
+    client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
+
+    response = client.post(
+        "/negotiations/counter", json={"run_id": "run-1", "carrier_ask": 0}, headers=HEADERS
+    )
+
+    assert response.status_code == 422
+
+
+# --- booking ------------------------------------------------------------
+
+
+def _agree_a_rate(client, run_id: str = "run-1", ask: int = 2500):
+    load_id = _negotiable_load(client, run_id)
+    client.post("/negotiations", json={"run_id": run_id, "load_id": load_id}, headers=HEADERS)
+    decision = client.post(
+        "/negotiations/counter", json={"run_id": run_id, "carrier_ask": ask}, headers=HEADERS
+    ).json()
+    assert decision["action"] == "accept"
+    return load_id, decision["amount"]
+
+
+def test_a_confirmed_booking_reports_booked(api):
+    client, _ = api
+    load_id, rate = _agree_a_rate(client)
+
+    body = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert body["status"] == "booked"
+    assert body["result_code"] == "booked"
+    assert body["booking_ref"]
+
+
+def test_the_rate_comes_from_the_session_not_the_request(api):
+    """There is no rate field to send, and sending one is a 422."""
+    client, container = api
+    _agree_a_rate(client)
+
+    response = client.post(
+        "/bookings", json={"run_id": "run-1", "agreed_rate": 99999}, headers=HEADERS
+    )
+
+    assert response.status_code == 422
+
+
+def test_an_ambiguous_booking_is_pending_never_booked(api):
+    """The write lands, the response is lost: a rep confirms, we do not claim it."""
+    client, container = api
+    _agree_a_rate(client)
+    container.fake_tms.script = [PARTIAL]
+    container.fake_tms.booking_lands_despite_fault = True
+
+    body = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert body["result_code"] == "booking_pending"
+    assert body["status"] == "booked_unconfirmed"
+    assert body["booking_ref"] is None
+
+
+def test_an_already_booked_load_is_pending(api):
+    client, container = api
+    _agree_a_rate(client)
+    container.fake_tms.book_result = BOOK_ALREADY
+
+    body = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert body["result_code"] == "booking_pending"
+
+
+def test_booking_without_an_agreed_rate_is_refused(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    response = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "no_agreed_rate"
+
+
+# --- handoff ------------------------------------------------------------
+
+
+def test_a_handoff_works_without_verification(api):
+    """The escape hatch must not require the thing it exists to work around."""
+    client, container = api
+
+    body = client.post(
+        "/handoff", json={"run_id": "run-noverify", "reason": "onboarding"}, headers=HEADERS
+    ).json()
+
+    assert body["ticket_id"].startswith("rep_")
+    assert len(container.handoffs) == 1
+
+
+def test_an_unknown_reason_is_recorded_as_requested(api):
+    client, container = api
+
+    client.post(
+        "/handoff", json={"run_id": "run-1", "reason": "something odd"}, headers=HEADERS
+    )
+
+    assert container.handoffs.pending()[0].reason.value == "requested"
+
+
+# --- errors -------------------------------------------------------------
+
+
+def test_a_tms_fault_becomes_a_speakable_error(api):
+    client, container = api
+    become_verified(client, "run-1")
+    container.fake_tms.error_code = "SERVER_ERROR"
+    container.fake_tms.error_command = "LOAD_QUERY"
+
+    response = client.post(
+        "/loads/search", json={"run_id": "run-1", "equipment": "DRY_VAN"}, headers=HEADERS
+    )
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["error"] == "tms_unavailable"
+    # Nothing internal in what the agent gets.
+    text = json.dumps(body)
+    for leak in ("SERVER_ERROR", "LOAD_QUERY", "AUTH", "127.0.0.1", "Traceback", "tms."):
+        assert leak not in text
+
+
+def test_an_unknown_run_id_is_treated_as_an_unverified_call(api):
+    """A run_id we have never seen starts a fresh call, so it has verified nothing."""
+    client, _ = api
+
+    response = client.post(
+        "/negotiations/counter", json={"run_id": "never-seen", "carrier_ask": 2000}, headers=HEADERS
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "not_verified"
+
+
+def test_verifying_against_an_unknown_run_id_is_not_found(api):
+    """Unlike the gated routes, verify does not start a call: there is no code to check."""
+    client, _ = api
+
+    response = client.post(
+        "/otp/verify", json={"run_id": "never-seen", "code": "123456"}, headers=HEADERS
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "session_not_found"
+
+
+def test_a_slow_tms_is_cut_off_by_the_budget():
+    """A voice tool cannot hang; the budget ends it and says so."""
+    with api_app(request_budget_seconds=0.4) as (client, container):
+        become_verified(client, "run-1")
+        container.fake_tms.mode = TIMEOUT
+        container.fake_tms.hold_seconds = 3.0
+
+        response = client.post(
+            "/loads/search", json={"run_id": "run-1", "equipment": "DRY_VAN"}, headers=HEADERS
+        )
+
+    assert response.status_code == 504
+    assert response.json()["error"] == "tms_timeout"
+
+
+# --- events -------------------------------------------------------------
+
+
+def test_a_full_call_is_recorded_in_the_event_log(api):
+    from app.events import EventType
+
+    client, container = api
+    load_id, _ = _agree_a_rate(client)
+    client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS)
+    client.post("/handoff", json={"run_id": "run-1"}, headers=HEADERS)
+
+    recorded = [event.type for event in container.sink.for_run("run-1")]
+
+    assert recorded == [
+        EventType.FMCSA_CHECKED,
+        EventType.OTP_SENT,
+        EventType.OTP_VERIFIED,
+        EventType.SEARCH_PERFORMED,
+        EventType.NEGOTIATION_OPENED,
+        EventType.NEGOTIATION_CLOSED,
+        EventType.BOOKING_ATTEMPTED,
+        EventType.BOOKING_RESULT,
+        EventType.HANDOFF_CREATED,
+    ]
+
+
+def test_the_event_log_holds_the_ceiling_the_agent_never_sees(api):
+    from app.events import EventType
+
+    client, container = api
+    load_id, _ = _agree_a_rate(client)
+
+    opened = container.sink.of_type(EventType.NEGOTIATION_OPENED)[0]
+
+    assert opened.payload["ceiling"] > 0
+    assert opened.payload["load_id"] == load_id
+
+
+def test_a_search_that_finds_nothing_is_still_recorded(api):
+    from app.events import EventType
+
+    client, container = api
+    become_verified(client, "run-1")
+    search(client, "run-1", equipment="FLATBED")
+
+    (event,) = container.sink.of_type(EventType.SEARCH_PERFORMED)
+
+    assert event.payload["results"] == 0

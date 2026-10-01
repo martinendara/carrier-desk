@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 
 import pytest
-from fake_tms import (
+from app.tms.fake_server import (
     BOOK_ALREADY,
     BOOK_INVALID_RATE,
     DELAYED,

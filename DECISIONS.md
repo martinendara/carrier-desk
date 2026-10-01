@@ -516,3 +516,173 @@ never started.
 **Why.** A POC that is honest about its single-instance assumption is safer than one that
 implies horizontal scalability it does not have. The TTL is monotonic-clock based, so a
 wall-clock jump cannot expire a live call.
+
+---
+
+# Phase 3 — the HTTP API
+
+---
+
+## 29. The verification gate is an explicit call, guarded by a test that reads the route table
+
+**Problem.** Search, negotiation, booking and detail must refuse an unverified call. The
+tidy FastAPI way is a dependency, but every gated route takes a different request body, so
+a dependency would have to re-declare it — and FastAPI would then see the body as two
+parameters. The other tidy way, a decorator per route, is a check that has to be
+remembered.
+
+**Choice.** Each gated handler calls `require_verified(session)` explicitly, and
+`test_api.py` walks the app's own route table: every route that is not on the short
+"works before verification" list must answer 403 to an unverified call, and any route not
+listed in the test's body map fails it.
+
+**Rejected.** A dependency (fights the body model), a decorator (forgettable), and a
+manual list of paths to check (stale the first time someone adds a route).
+
+**Why.** The guarantee should not rest on someone remembering. Reading the route table
+means a new endpoint is gated by default — the test fails until its author either gates it
+or adds it to the exception list with a reason.
+
+---
+
+## 30. Load detail is gated too, though §8 does not say so
+
+**Problem.** CLAUDE.md §8 lists search, negotiation and booking as requiring a verified
+OTP. `GET /loads/{load_id}` is not on that list.
+
+**Choice.** Gate it anyway.
+
+**Rejected.** Following the list literally, which would let an unverified caller pull
+origin, destination and rate for any load id it can guess.
+
+**Why.** Pitching freight to an unverified caller is the thing verification exists to
+prevent, and a detail fetch is the pitch. The stricter reading costs one 403 on a path
+that has no other purpose.
+
+---
+
+## 31. Fetching a load's detail does not count as showing it
+
+**Problem.** The natural convenience is to record a load as "shown" whenever its detail is
+fetched. That would make the flow forgiving: an agent could name any load id, get the
+detail, and negotiate.
+
+**Choice.** Only `/loads/search` records shown loads. Detail is a read.
+
+**Rejected.** Recording on both, which collapses "you may only negotiate what you were
+shown" into "you may negotiate anything you can name" — and load ids are short and
+guessable (`LD00896`).
+
+**Why.** The rule is about what the carrier on the phone was actually offered. Search is
+the moment that happens; a lookup afterwards is not a new offer.
+
+---
+
+## 32. The OTP response has two named views, and the server decides the shape
+
+**Problem.** The platform needs the plaintext code for its delivery node; the agent must
+never see it. One flat response puts the code one mis-mapped field away from the
+conversation.
+
+**Choice.** `delivery: {destination, code}` and `masked_destination`, as separate fields
+with descriptions that say which is which. The spoken line never contains either the code
+or the full address, and a test asserts both.
+
+**Rejected.** One dictionary plus documentation, and putting the code behind a separate
+endpoint the agent could also call.
+
+**Why.** The platform does the mapping (into a hidden Tool Call Result field, which stays
+available to later nodes without entering the agent's context). The server's job is to
+hand over a shape that cannot be merged by accident.
+
+---
+
+## 33. `TMS_MODE=fake` runs the real client against an in-process server
+
+**Problem.** Platform workflow tests fire real webhooks, so development has to run a whole
+call without touching the live TMS — where every successful booking permanently consumes a
+load.
+
+**Choice.** `TMS_MODE=fake` starts the fixture-replaying TCP server from
+`app/tms/fake_server.py` on a loopback port, and the ordinary `TmsClient` connects to it.
+Same socket code, same deadlines, same framing, same retry policy. Only the data is canned.
+
+**Rejected.** A stub client that returns objects directly — it would skip exactly the code
+that is riskiest.
+
+**Why.** Swapping the data source by configuration, not by code, is what makes the switch
+safe to flip in a demo. The fake also synthesises `LOAD_GET` records for the loads the
+fixture only captured as `LOAD_QUERY` lines, because otherwise you could search and not
+negotiate, which is the only thing the fake is for.
+
+---
+
+## 34. One time budget per HTTP request, and running out of it is reported as such
+
+**Problem.** The platform's webhook timeout is undocumented, and a voice tool that hangs is
+a dropped call. The per-attempt read deadline does not bound anything on its own: three
+attempts with backoff can take longer than the whole request should.
+
+**Choice.** A `Deadline` created once per request (default 8 s), threaded into every TMS
+call the request makes. An attempt's read window is clamped to what is left, and a retry is
+skipped when the backoff would not fit. When the budget is what stopped the retry, the
+failure is reported as `TmsBudgetExhausted` (504) rather than as the underlying timeout.
+
+**Rejected.** A per-attempt deadline only, and a hard `asyncio.wait_for` around the handler
+that cannot tell a slow TMS from a slow anything-else.
+
+**Why.** A budget that spans the request is the only one that bounds the request. Reporting
+it accurately matters because it is the one failure here the platform can usefully retry.
+
+---
+
+## 35. Failures answer with `{error, say}` and nothing else
+
+**Problem.** A voice agent will read whatever it is given out loud, and the interesting
+part of a failure — the TMS error code, the host, the stack — is exactly the part that
+should not be spoken to a carrier.
+
+**Choice.** Every failure is mapped to a short machine code and one sentence from
+`app/api/phrasing.py`. The exception type and message go to the log. A generic handler
+catches anything unmapped so the response shape holds even for a bug.
+
+**Rejected.** Returning the exception message, and returning a bare status code the agent
+has to invent words for.
+
+**Why.** Two audiences, two artefacts: the carrier hears a sentence, the operator gets the
+traceback. A single response cannot serve both, so it serves the one that is speaking.
+
+---
+
+## 36. An ambiguous booking is `booking_pending` in the response, and the rate is never in the request
+
+**Problem.** Two ways to turn a good booking flow into a bad one: reporting `booked` for a
+booking we could not confirm, and accepting a rate from the caller.
+
+**Choice.** `/bookings` takes only `run_id`. The rate comes from the negotiation session.
+An unconfirmed or reference-less booking returns `booked_unconfirmed` with
+`result_code: booking_pending`; `booked` is returned only when the reference came back.
+
+**Rejected.** Accepting `agreed_rate` in the body for convenience, and treating a
+`STATUS:BOOKED` response without a reference as success.
+
+**Why.** The client already refuses to guess; this is where the promise is kept in the
+response the platform sees, and where the rate stops being something the agent could
+substitute.
+
+---
+
+## 37. The app is a factory, with no module-level `app`
+
+**Problem.** `uvicorn app.main:app` is the conventional incantation, and it makes the
+module import the service at import time.
+
+**Choice.** `uvicorn --factory app.main:create_app`. Building the container touches
+configuration that must fail loudly — a missing OTP secret, a bad TMS mode — and the import
+is exactly when you want to be able to read that error rather than have it happen inside
+the server's own startup.
+
+**Rejected.** A module-level `app = create_app()` for convention's sake.
+
+**Why.** The tests import `create_app`; so does anyone debugging. A module that cannot be
+imported without a fully configured environment is a module that is hard to debug.

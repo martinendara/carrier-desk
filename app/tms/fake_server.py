@@ -1,11 +1,17 @@
 """A local TCP server that replays the recorded TMS fixtures with injected faults.
 
-Tests must never touch the live server: every successful ``LOAD_BOOK``
-permanently consumes a load for our token, so a test suite aimed at the real
-host would quietly destroy the demo data. This module gives the tests a server
-that behaves like the real one on the wire -- same padding, same ``END``
-framing, same error codes -- and can be told to fail in each of the ways
-docs/tms-protocol.md documents.
+Two callers, one implementation:
+
+* **Tests** must never touch the live server — every successful ``LOAD_BOOK``
+  permanently consumes a load for our token, so a suite aimed at the real host
+  would quietly destroy the demo data.
+* **Development** runs with ``TMS_MODE=fake`` so a platform webhook test can
+  drive a whole call without spending live loads. The server runs in-process,
+  on a loopback port, and the real :class:`~app.tms.client.TmsClient` talks to
+  it — so the socket, deadline and framing code all still run.
+
+Either way the server behaves like the real one on the wire: same padding, same
+``END`` framing, same error codes.
 
 Modes
 -----
@@ -24,15 +30,23 @@ works, the retry succeeds".
 
 from __future__ import annotations
 
+import os
 import re
 import socketserver
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
-DEFAULT_FIXTURES = FIXTURES_DIR / "tms_samples.txt"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The recorded live samples. The fake is a development and test component, so
+#: it seeds itself from the recorded fixtures rather than carrying a second copy
+#: of the same data. Override with TMS_FAKE_FIXTURES when the files move.
+DEFAULT_FIXTURES = Path(
+    os.environ.get("TMS_FAKE_FIXTURES", REPO_ROOT / "tests" / "fixtures" / "tms_samples.txt")
+)
 
 # Modes
 NORMAL = "normal"
@@ -184,6 +198,7 @@ class FakeTms:
         self.port = port
 
         self.query_records, self.detail_record = _blocks()
+        self.detail_load_id = _field(self.detail_record, "LOAD_ID")
 
         #: Requests received, in order, with AUTH redacted.
         self.requests: list[dict[str, str]] = []
@@ -196,6 +211,10 @@ class FakeTms:
     # --- lifecycle ------------------------------------------------------
 
     def start(self) -> "FakeTms":
+        if self._server is not None:
+            # Idempotent: `start_fake_tms()` returns an already-running server,
+            # and a caller wrapping it in `with` must not try to bind twice.
+            return self
         server = _Server((self.host, self.port), _Handler)
         server.fake = self
         self._server = server
@@ -282,8 +301,8 @@ class FakeTms:
         return self._lines(records)
 
     def _get_body(self, load_id: str) -> str:
-        record = self.detail_record
-        if _field(record, "LOAD_ID") != load_id:
+        record = self._detail_record_for(load_id)
+        if record is None:
             return self._error_frame("UNKNOWN_LOAD", "load not found")
 
         if load_id in self._booked:
@@ -291,6 +310,51 @@ class FakeTms:
         elif self.load_status:
             record = self._with_status(record, self.load_status)
         return self._lines([record])
+
+    def _detail_record_for(self, load_id: str) -> str | None:
+        """The recorded detail line, or a synthesised one for a known load.
+
+        The fixture only captured `LOAD_GET` for one load, but the real server
+        answers for any load it has. Synthesising keeps `TMS_MODE=fake` usable
+        end to end — without it you could search and not negotiate, which is the
+        only thing the fake is for.
+
+        The invented fields are marked here rather than in the data: `MAX_BUY`
+        above the posted rate, and a delivery date three days out. Nothing about
+        them is claimed to match the live server.
+        """
+        if load_id == self.detail_load_id:
+            return self.detail_record
+
+        query_line = next(
+            (line for line in self.query_records if _field(line, "LOAD_ID") == load_id), None
+        )
+        if query_line is None:
+            return None
+
+        fields = dict(_tokens(query_line))
+        rate = int(fields.get("RATE", "0") or 0)
+
+        # Insert the detail-only columns in the order the real server uses:
+        # DELIVERY_DT after the pickup, the cargo fields after RATE, DIMS after
+        # MILES, NOTES before STATUS, and MAX_BUY last.
+        insertions = {
+            "PICKUP_DT": [("DELIVERY_DT", _plus_days(fields.get("PICKUP_DT", ""), 3))],
+            "RATE": [
+                ("WEIGHT", "41000   "),
+                ("COMMODITY", "General freight              "),
+                ("PIECES", "24    "),
+            ],
+            "MILES": [("DIMS", "53ft x 8ft x 9ft              ")],
+            "DIMS": [("NOTES", " " * 40)],
+            "STATUS": [("MAX_BUY", f"{_fake_max_buy(rate)}    ")],
+        }
+
+        line: list[str] = []
+        for key, value in _tokens(query_line):
+            line.append(f"{key}:{value}")
+            line.extend(f"{extra_key}:{extra_value}" for extra_key, extra_value in insertions.get(key, ()))
+        return "|".join(line)
 
     def _book_body(self, load_id: str, *, lands: bool = True) -> str:
         if self.book_result == BOOK_INVALID_RATE:
@@ -369,6 +433,38 @@ def _field(record: str, name: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _tokens(record: str) -> list[tuple[str, str]]:
+    """Split a record line into ordered (KEY, value) pairs, keeping padding."""
+    pairs = []
+    for token in record.split("|"):
+        key, separator, value = token.partition(":")
+        if separator:
+            pairs.append((key.strip().upper(), value))
+    return pairs
+
+
+def _ceil25(value: int) -> int:
+    return -(-value // 25) * 25
+
+
+def _fake_max_buy(rate: int) -> int:
+    """A ceiling above the posted rate, invented by the fake.
+
+    The recorded sample had MAX_BUY about 22% over RATE; this reproduces the
+    shape, not the number. Nothing here claims to match the live server.
+    """
+    return _ceil25(rate + max(300, rate // 5))
+
+
+def _plus_days(timestamp: str, days: int) -> str:
+    """`YYYYMMDDHHMMSS` shifted by whole days. Returns the input if unparseable."""
+    try:
+        moment = datetime.strptime(timestamp.strip(), "%Y%m%d%H%M%S")
+    except ValueError:
+        return timestamp
+    return (moment + timedelta(days=days)).strftime("%Y%m%d%H%M%S")
+
+
 class _Handler(socketserver.BaseRequestHandler):
     def handle(self) -> None:  # noqa: D102 - socketserver entry point
         line = self._read_request()
@@ -406,3 +502,12 @@ class _Server(socketserver.ThreadingTCPServer):
     #: open on purpose, and waiting for them would add their full delay to
     #: every test that merely wants the server gone.
     block_on_close = False
+
+
+def start_fake_tms(**options) -> FakeTms:
+    """Start a fake TMS on an ephemeral loopback port.
+
+    Used by `TMS_MODE=fake`. The caller owns the returned object and must call
+    `.stop()` — `app.main` does that on shutdown.
+    """
+    return FakeTms(host="127.0.0.1", port=0, **options).start()

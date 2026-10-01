@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from fake_tms import load_fixture_blocks
+from app.tms.fake_server import load_fixture_blocks
 
 from app.tms.models import Load, LoadDetail
 from app.tms.protocol import (

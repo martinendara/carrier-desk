@@ -3,6 +3,7 @@
 from app.sessions.errors import (
     LoadNotShown,
     NegotiationLimitReached,
+    NotVerified,
     SessionError,
     SessionNotFound,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "NegotiationLimitReached",
     "NegotiationOutcome",
     "NegotiationSession",
+    "NotVerified",
     "OtpChallenge",
     "OtpStatus",
     "RunSession",

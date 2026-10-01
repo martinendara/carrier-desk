@@ -77,6 +77,15 @@ class TmsMalformed(TmsFault):
     """Framing or field violations: bad delimiter, no colon, non-ASCII, oversized."""
 
 
+class TmsBudgetExhausted(TmsFault):
+    """The caller's time budget ran out before this command could be sent.
+
+    Distinct from :class:`TmsTimeout`, which is one attempt running out of its
+    read deadline. This one means the *whole request* is out of time, so no
+    retry is worth starting: it would spend time the caller has already spent.
+    """
+
+
 class TmsError(TmsFault):
     """The server answered with ``ERR|CODE:<code>``.
 

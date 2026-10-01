@@ -13,6 +13,7 @@ the wire format can be tested without a server.
 from app.tms.client import TmsClient
 from app.tms.models import BookResult, Load, LoadDetail
 from app.tms.protocol import (
+    TmsBudgetExhausted,
     TmsError,
     TmsFault,
     TmsInvalidInput,
@@ -25,6 +26,7 @@ __all__ = [
     "BookResult",
     "Load",
     "LoadDetail",
+    "TmsBudgetExhausted",
     "TmsClient",
     "TmsError",
     "TmsFault",

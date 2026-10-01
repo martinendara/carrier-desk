@@ -26,3 +26,14 @@ class LoadNotShown(SessionError):
 
 class NegotiationLimitReached(SessionError):
     """The call already used its negotiation budget (original + one alternative)."""
+
+
+class NotVerified(SessionError):
+    """The call has not verified an OTP, so it may not search, negotiate or book.
+
+    Enforced in the HTTP layer (CLAUDE.md §8). The services below it stay
+    unaware of OTP so that each of them has one job; this is the one place the
+    gate is applied, and it is applied by a single shared dependency rather than
+    per route, because a gate that has to be remembered is a gate that will be
+    forgotten.
+    """
