@@ -1,0 +1,681 @@
+{
+  "version": {
+    "id": "01a0f8f5-61b0-786f-8b7b-639f5b11e76c",
+    "slug": "lkn1z95yh39q",
+    "org_id": "01a0f4af-ab1a-7c44-8eaa-08d2351014f5",
+    "use_case_id": "01a0f8f5-618a-73fb-8e8a-b422c81b4226",
+    "version_number": 1,
+    "name": "Version 1",
+    "is_published": false,
+    "is_live": false,
+    "source_version_id": null,
+    "timestamp": "2026-10-01T19:33:46.032Z",
+    "published_at": null,
+    "is_deleted": false,
+    "description": "",
+    "environment": "production",
+    "created_by": "01a0f3d9-8c51-7a6d-8e05-573e43d1b113",
+    "created_by_api_key": null,
+    "created_by_entity": "user",
+    "in_experiment": false,
+    "workflow_version": 3
+  },
+  "nodes": [
+    {
+      "id": "01a0f8f9-3f8d-7f19-af0e-56df2548c180",
+      "persistent_id": "01a0f8f9-3f8d-7f19-af0e-56df2548c180",
+      "slug": "0dasmis58xag",
+      "org_id": "01a0f4af-ab1a-7c44-8eaa-08d2351014f5",
+      "use_case_id": "01a0f8f5-618a-73fb-8e8a-b422c81b4226",
+      "parent_id": null,
+      "version_id": "01a0f8f5-61b0-786f-8b7b-639f5b11e76c",
+      "component_version_id": null,
+      "component_implementation_id": null,
+      "component_source_persistent_id": null,
+      "type": "action",
+      "name": "Inbound carrier call",
+      "is_complete": false,
+      "locked_output_schema_id": null,
+      "node_output_id": null,
+      "node_generated_schema_id": null,
+      "sort_index": 0,
+      "timestamp": "2026-10-01T19:37:59.836Z",
+      "is_deleted": false,
+      "is_deactivated": false,
+      "configuration": {},
+      "staging_configuration": {},
+      "development_configuration": {},
+      "retry_configuration": {},
+      "outbound_retry_configuration": {},
+      "failure_configuration": {},
+      "node_component_id": null,
+      "node_component_input_mapping": [],
+      "node_output": null,
+      "integration_id": "0192e48a-81d8-71cb-93dc-efd8ad63d86b",
+      "event_id": "6e32e01e-722f-4b8b-9372-500b845686d1",
+      "trigger_interval": null,
+      "multi_event_behavior": "parallel",
+      "hidden_fields": [],
+      "is_response_node": false,
+      "integration": {
+        "id": "0192e48a-81d8-71cb-93dc-efd8ad63d86b",
+        "name": "AI Agent",
+        "group": "built-in",
+        "icon": "/integrations/agents.svg",
+        "description": "Create AI Agents",
+        "docs_url": "https://docs.happyrobot.ai/integrations/phone",
+        "website_url": "https://docs.happyrobot.ai/integrations/phone",
+        "is_top": true,
+        "requires_credentials": false,
+        "agent_specific": false
+      },
+      "event": {
+        "id": "6e32e01e-722f-4b8b-9372-500b845686d1",
+        "name": "Web call",
+        "integration_id": "0192e48a-81d8-71cb-93dc-efd8ad63d86b",
+        "type": 0,
+        "description": "Trigger the workflow using the Web SDK",
+        "is_instant": true,
+        "has_cron_trigger": false,
+        "activity_name": "",
+        "task_queue": "",
+        "timeout_seconds": 10,
+        "retry_policy": {
+          "InitialInterval": 10,
+          "MaximumAttempts": 2,
+          "BackoffCoefficient": 2
+        },
+        "wait_for_signal_seconds": 0,
+        "key_for_sleep": null,
+        "coming_soon": false,
+        "metadata": {},
+        "delegated_category": null
+      }
+    },
+    {
+      "id": "01a0f900-0f9c-7302-bf0f-3c9f5d63bff8",
+      "persistent_id": "01a0f900-0f9c-7302-bf0f-3c9f5d63bff8",
+      "slug": "u8izq2rp3zkm",
+      "org_id": "01a0f4af-ab1a-7c44-8eaa-08d2351014f5",
+      "use_case_id": "01a0f8f5-618a-73fb-8e8a-b422c81b4226",
+      "parent_id": "01a0f900-0f9c-7302-bf0f-3c9e56c48f1a",
+      "version_id": "01a0f8f5-61b0-786f-8b7b-639f5b11e76c",
+      "component_version_id": null,
+      "component_implementation_id": null,
+      "component_source_persistent_id": null,
+      "type": "prompt",
+      "name": "Prompt",
+      "is_complete": false,
+      "locked_output_schema_id": null,
+      "node_output_id": null,
+      "node_generated_schema_id": null,
+      "sort_index": -1,
+      "timestamp": "2026-10-01T19:45:26.408Z",
+      "is_deleted": false,
+      "is_deactivated": false,
+      "configuration": {},
+      "staging_configuration": {},
+      "development_configuration": {},
+      "retry_configuration": {},
+      "outbound_retry_configuration": {},
+      "failure_configuration": {},
+      "node_component_id": null,
+      "node_component_input_mapping": [],
+      "node_output": null,
+      "prompt": [],
+      "prompt_md": null,
+      "inbound_prompt": null,
+      "inbound_prompt_md": null,
+      "initial_message": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "text": ""
+            }
+          ]
+        }
+      ],
+      "initial_message_uninterruptible": false,
+      "receiving_initial_message": null,
+      "model": {
+        "type": "static",
+        "static": {
+          "id": "gpt-5.6-luna",
+          "name": "gpt-5.6-luna"
+        }
+      },
+      "use_custom_llm": false,
+      "custom_llm_credential": null
+    },
+    {
+      "id": "01a0f900-0f9c-7302-bf0f-3c9e56c48f1a",
+      "persistent_id": "01a0f900-0f9c-7302-bf0f-3c9e56c48f1a",
+      "slug": "csu4visnta2p",
+      "org_id": "01a0f4af-ab1a-7c44-8eaa-08d2351014f5",
+      "use_case_id": "01a0f8f5-618a-73fb-8e8a-b422c81b4226",
+      "parent_id": "01a0f8f9-3f8d-7f19-af0e-56df2548c180",
+      "version_id": "01a0f8f5-61b0-786f-8b7b-639f5b11e76c",
+      "component_version_id": null,
+      "component_implementation_id": null,
+      "component_source_persistent_id": null,
+      "type": "action",
+      "name": "Carrier Sales Agent",
+      "is_complete": false,
+      "locked_output_schema_id": null,
+      "node_output_id": null,
+      "node_generated_schema_id": null,
+      "sort_index": 0,
+      "timestamp": "2026-10-01T19:45:26.408Z",
+      "is_deleted": false,
+      "is_deactivated": false,
+      "configuration": {
+        "agent": {
+          "name": [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "Sam"
+                }
+              ]
+            }
+          ],
+          "languages": [
+            {
+              "type": "static",
+              "static": {
+                "id": "en",
+                "name": "English"
+              }
+            }
+          ],
+          "language_accents": [
+            {
+              "type": "static",
+              "static": {
+                "id": "en-us",
+                "name": "English (United States)"
+              }
+            }
+          ],
+          "voices": [
+            {
+              "type": "static",
+              "static": {
+                "id": "owfkcv0oum1r",
+                "name": "Russell Fleming Turbo Multi"
+              }
+            }
+          ]
+        },
+        "recording_style": "ai_recording",
+        "recording_language": {
+          "type": "static",
+          "static": {
+            "id": "en"
+          }
+        },
+        "background": {
+          "type": "static",
+          "static": {
+            "id": "no_background",
+            "name": "No background noise",
+            "description": "https://storage.googleapis.com/happyrobot-public/backgrounds/office.8k.wav"
+          }
+        },
+        "business_hours_setting_name": "default",
+        "transcription_context": [
+          {
+            "type": "paragraph",
+            "children": [
+              {
+                "text": "Callers are US truck drivers and carrier dispatchers looking for freight loads. They will say MC numbers (6 to 7 digits), US city and state names, equipment types (dry van, reefer, flatbed) and dollar rates."
+              }
+            ]
+          }
+        ],
+        "keyterms": [
+          [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "MC number"
+                }
+              ]
+            }
+          ],
+          [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "dry van"
+                }
+              ]
+            }
+          ],
+          [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "reefer"
+                }
+              ]
+            }
+          ],
+          [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "flatbed"
+                }
+              ]
+            }
+          ],
+          [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "load id"
+                }
+              ]
+            }
+          ],
+          [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "deadhead"
+                }
+              ]
+            }
+          ]
+        ],
+        "enable_denoised_stt": true
+      },
+      "staging_configuration": {},
+      "development_configuration": {},
+      "retry_configuration": {},
+      "outbound_retry_configuration": {},
+      "failure_configuration": {},
+      "node_component_id": null,
+      "node_component_input_mapping": [],
+      "node_output": null,
+      "integration_id": "0192e48a-81d8-71cb-93dc-efd8ad63d86b",
+      "event_id": "0192e5dc-08df-78bf-a549-f43c6bf9f087",
+      "trigger_interval": null,
+      "multi_event_behavior": "parallel",
+      "hidden_fields": [],
+      "is_response_node": false,
+      "integration": {
+        "id": "0192e48a-81d8-71cb-93dc-efd8ad63d86b",
+        "name": "AI Agent",
+        "group": "built-in",
+        "icon": "/integrations/agents.svg",
+        "description": "Create AI Agents",
+        "docs_url": "https://docs.happyrobot.ai/integrations/phone",
+        "website_url": "https://docs.happyrobot.ai/integrations/phone",
+        "is_top": true,
+        "requires_credentials": false,
+        "agent_specific": false
+      },
+      "event": {
+        "id": "0192e5dc-08df-78bf-a549-f43c6bf9f087",
+        "name": "Inbound Voice Agent",
+        "integration_id": "0192e48a-81d8-71cb-93dc-efd8ad63d86b",
+        "type": 1,
+        "description": "Receive inbound call",
+        "is_instant": false,
+        "has_cron_trigger": false,
+        "activity_name": "InboundVoiceAgent",
+        "task_queue": "go-worker",
+        "timeout_seconds": 20,
+        "retry_policy": {
+          "InitialInterval": 10,
+          "MaximumAttempts": 2,
+          "BackoffCoefficient": 2
+        },
+        "wait_for_signal_seconds": 3600,
+        "key_for_sleep": null,
+        "coming_soon": false,
+        "metadata": {},
+        "delegated_category": null
+      }
+    },
+    {
+      "id": "01a0f937-c2e1-7900-b73f-cec63b12fa32",
+      "persistent_id": "01a0f937-c2e1-7900-b73f-cec63b12fa32",
+      "slug": "dwu8b12185je",
+      "org_id": "01a0f4af-ab1a-7c44-8eaa-08d2351014f5",
+      "use_case_id": "01a0f8f5-618a-73fb-8e8a-b422c81b4226",
+      "parent_id": "01a0f900-0f9c-7302-bf0f-3c9f5d63bff8",
+      "version_id": "01a0f8f5-61b0-786f-8b7b-639f5b11e76c",
+      "component_version_id": null,
+      "component_implementation_id": null,
+      "component_source_persistent_id": null,
+      "type": "tool",
+      "name": "verify_carrier",
+      "is_complete": true,
+      "locked_output_schema_id": null,
+      "node_output_id": null,
+      "node_generated_schema_id": null,
+      "sort_index": 0,
+      "timestamp": "2026-10-01T20:46:16.686Z",
+      "is_deleted": false,
+      "is_deactivated": false,
+      "configuration": {
+        "tool_call_result_ack": "ack"
+      },
+      "staging_configuration": {},
+      "development_configuration": {},
+      "retry_configuration": {},
+      "outbound_retry_configuration": {},
+      "failure_configuration": {},
+      "node_component_id": null,
+      "node_component_input_mapping": [],
+      "node_output": null,
+      "function": {
+        "description": [
+          {
+            "type": "paragraph",
+            "children": [
+              {
+                "text": "Verifies the carrier's operating authority with FMCSA. Use it as soon as the caller gives their MC number, before anything else. Never skip it and never look for loads before it passes."
+              }
+            ]
+          }
+        ],
+        "message": {
+          "type": "ai",
+          "description": [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "text": "Tell the caller in one short sentence that you're checking their authority. Do not mention FMCSA by name or explain the process."
+                }
+              ]
+            }
+          ],
+          "example": "Got it, give me one second to pull that up."
+        },
+        "parameters": [
+          {
+            "name": "mc_number",
+            "description": [
+              {
+                "type": "paragraph",
+                "children": [
+                  {
+                    "text": "The carrier's MC number, digits only, without the \"MC\" prefix"
+                  }
+                ]
+              }
+            ],
+            "example": "123456",
+            "required": true
+          },
+          {
+            "name": "run_id",
+            "description": [
+              {
+                "type": "paragraph",
+                "children": [
+                  {
+                    "text": "Platform-injected call identifier. Never set by the agent"
+                  }
+                ]
+              }
+            ],
+            "required": true,
+            "binding": {
+              "mode": "fixed",
+              "value": [
+                {
+                  "type": "paragraph",
+                  "children": [
+                    {
+                      "text": "@current.run_id"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "hold_music": {
+          "type": "static"
+        },
+        "tool_index_id": "tool:01a0f937-c2e1-7900-b73f-cec63b12fa32",
+        "tool_index_hash": "49347f7367788828e9c717af9d245e28ff75ff14526598e4067a6a83f7b163e5"
+      }
+    },
+    {
+      "id": "01a0f943-7228-7a10-b9db-4316d4da353c",
+      "persistent_id": "01a0f943-7228-7a10-b9db-4316d4da353c",
+      "slug": "xadjudsooisl",
+      "org_id": "01a0f4af-ab1a-7c44-8eaa-08d2351014f5",
+      "use_case_id": "01a0f8f5-618a-73fb-8e8a-b422c81b4226",
+      "parent_id": "01a0f937-c2e1-7900-b73f-cec63b12fa32",
+      "version_id": "01a0f8f5-61b0-786f-8b7b-639f5b11e76c",
+      "component_version_id": null,
+      "component_implementation_id": null,
+      "component_source_persistent_id": null,
+      "type": "action",
+      "name": "Verify carrier",
+      "is_complete": true,
+      "locked_output_schema_id": null,
+      "node_output_id": "01a0f96d-e903-7cde-9344-b437cf69af4a",
+      "node_generated_schema_id": "01a0f96d-e903-7cde-9344-b437cf69af4a",
+      "sort_index": 0,
+      "timestamp": "2026-10-01T20:59:02.492Z",
+      "is_deleted": false,
+      "is_deactivated": false,
+      "configuration": {
+        "url": [
+          {
+            "type": "paragraph",
+            "children": [
+              {
+                "text": ""
+              },
+              {
+                "type": "variable",
+                "children": [
+                  {
+                    "text": ""
+                  }
+                ],
+                "group_id": "use_case_variables",
+                "variable_id": "SERVICE_BASE_URL"
+              },
+              {
+                "text": "/carriers/verify"
+              }
+            ]
+          }
+        ],
+        "params": [],
+        "headers": [
+          {
+            "key": "X-API-Key",
+            "keyTemplate": [
+              {
+                "type": "paragraph",
+                "children": [
+                  {
+                    "text": "X-API-Key"
+                  }
+                ]
+              }
+            ],
+            "value": [
+              {
+                "type": "paragraph",
+                "children": [
+                  {
+                    "text": ""
+                  },
+                  {
+                    "type": "variable",
+                    "children": [
+                      {
+                        "text": ""
+                      }
+                    ],
+                    "group_id": "use_case_variables",
+                    "variable_id": "SERVICE_API_KEY"
+                  },
+                  {
+                    "text": ""
+                  }
+                ]
+              }
+            ],
+            "enabled": true
+          }
+        ],
+        "authType": "none",
+        "apiKey": [
+          {
+            "type": "paragraph",
+            "children": [
+              {
+                "text": ""
+              }
+            ]
+          }
+        ],
+        "mtls": null,
+        "ignore5XX": false,
+        "responseHeaders": [],
+        "contentType": "application/json",
+        "xssProtection": true,
+        "webhookSchemaVersion": 2,
+        "body": {
+          "schemaVersion": 2,
+          "contentType": "application/json",
+          "raw": "{\n  \"run_id\": \"{{$var:01a0f937-c2e1-7900-b73f-cec63b12fa32.run_id}}\",\n  \"mc_number\": \"{{$var:01a0f937-c2e1-7900-b73f-cec63b12fa32.mc_number}}\"\n}"
+        }
+      },
+      "staging_configuration": {},
+      "development_configuration": {},
+      "retry_configuration": {
+        "retry_attempts": 1,
+        "retry_max_delay": 2,
+        "retry_initial_delay": 1,
+        "retry_backoff_multiplier": 2
+      },
+      "outbound_retry_configuration": {},
+      "failure_configuration": {},
+      "node_component_id": null,
+      "node_component_input_mapping": [],
+      "node_output": {
+        "id": "01a0f96d-e903-7cde-9344-b437cf69af4a",
+        "run_id": null,
+        "node_id": "01a0f943-7228-7a10-b9db-4316d4da353c",
+        "node_persistent_id": "01a0f943-7228-7a10-b9db-4316d4da353c",
+        "event_id": "01926f2b-2973-7ebf-ada1-e984251e27ec",
+        "session_id": null,
+        "chat_session_id": null,
+        "name": null,
+        "data": {
+          "error": "{\"error\":\"invalid_request\",\"say\":\"Sorry, I didn't catch that. Could you say it again?\"}"
+        },
+        "is_multiple": false,
+        "error": null,
+        "llm_model": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "cached_input_tokens": null,
+        "input": null,
+        "status": "succeeded",
+        "scope": "",
+        "data_deleted": false,
+        "started_at": null,
+        "timestamp": "2026-10-01T21:45:24.985Z",
+        "updated_at": "2026-10-01T21:45:24.985Z",
+        "flat_data": {
+          "error": "{\"error\":\"invalid_request\",\"say\":\"Sorry, I didn't catch that. Could you say it again?\"}"
+        }
+      },
+      "integration_id": "01926a93-064a-7a00-81b2-8ab78d5907e0",
+      "event_id": "01926f2b-2973-7ebf-ada1-e984251e27ec",
+      "trigger_interval": null,
+      "multi_event_behavior": "parallel",
+      "hidden_fields": [],
+      "is_response_node": false,
+      "integration": {
+        "id": "01926a93-064a-7a00-81b2-8ab78d5907e0",
+        "name": "Webhook",
+        "group": "built-in",
+        "icon": "/integrations/webhook.svg",
+        "description": "Connect your agents to external systems via REST APIs",
+        "docs_url": "https://docs.happyrobot.ai/integrations/webhook",
+        "website_url": "https://docs.happyrobot.ai/integrations/webhook",
+        "is_top": true,
+        "requires_credentials": false,
+        "agent_specific": false
+      },
+      "event": {
+        "id": "01926f2b-2973-7ebf-ada1-e984251e27ec",
+        "name": "POST",
+        "integration_id": "01926a93-064a-7a00-81b2-8ab78d5907e0",
+        "type": 1,
+        "description": "Execute  POST request to an endpoint.",
+        "is_instant": false,
+        "has_cron_trigger": false,
+        "activity_name": "WebhookPost",
+        "task_queue": "go-worker",
+        "timeout_seconds": 300,
+        "retry_policy": {
+          "InitialInterval": 10,
+          "MaximumAttempts": 2,
+          "BackoffCoefficient": 2
+        },
+        "wait_for_signal_seconds": 0,
+        "key_for_sleep": null,
+        "coming_soon": false,
+        "metadata": {},
+        "delegated_category": null
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "01a0f8f9-3f8d-7f19-af0e-56df2548c180",
+      "to_node": "01a0f900-0f9c-7302-bf0f-3c9e56c48f1a",
+      "created_at": "2026-10-01T19:45:26.408Z",
+      "updated_at": "2026-10-01T19:45:26.408Z",
+      "deleted_at": null
+    },
+    {
+      "from_node": "01a0f900-0f9c-7302-bf0f-3c9e56c48f1a",
+      "to_node": "01a0f900-0f9c-7302-bf0f-3c9f5d63bff8",
+      "created_at": "2026-10-01T19:45:26.408Z",
+      "updated_at": "2026-10-01T19:45:26.408Z",
+      "deleted_at": null
+    },
+    {
+      "from_node": "01a0f900-0f9c-7302-bf0f-3c9f5d63bff8",
+      "to_node": "01a0f937-c2e1-7900-b73f-cec63b12fa32",
+      "created_at": "2026-10-01T20:46:16.686Z",
+      "updated_at": "2026-10-01T20:46:16.686Z",
+      "deleted_at": null
+    },
+    {
+      "from_node": "01a0f937-c2e1-7900-b73f-cec63b12fa32",
+      "to_node": "01a0f943-7228-7a10-b9db-4316d4da353c",
+      "created_at": "2026-10-01T20:59:02.492Z",
+      "updated_at": "2026-10-01T20:59:02.492Z",
+      "deleted_at": null
+    }
+  ],
+  "workflowVersion": 3
+}
