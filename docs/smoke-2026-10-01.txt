@@ -1,0 +1,47 @@
+========================================================================
+TMS smoke test (read-only)
+host     : tramway.proxy.rlwy.net:17159
+token    : <redacted, 23 chars>
+deadline : 5.0s, 3 attempts
+started  : 2026-10-01T10:45:21.099143+00:00
+fixtures : /Users/martinendara/carrier desk fde happyrobot/carrier-desk/tests/fixtures/tms_samples.txt
+========================================================================
+
+── 1. DEBUG_ECHO (encoder sanity only)
+   request : CMD:DEBUG_ECHO|AUTH:<redacted>|MSG:smoke
+   result  : TmsError in 519 ms
+   detail  : TMS error AUTH_FAILED: Invalid or missing auth token
+
+── 2. LOAD_QUERY baseline
+   request : CMD:LOAD_QUERY|AUTH:<redacted>|EQTYPE:DRY_VAN|MAX_RESULTS:5
+   result  : TmsError in 366 ms
+   detail  : TMS error AUTH_FAILED: Invalid or missing auth token
+
+── 3. LOAD_GET — skipped, the baseline returned no loads
+
+── 4. LOAD_QUERY EQTYPE:FLATBED
+   request : CMD:LOAD_QUERY|AUTH:<redacted>|EQTYPE:FLATBED|MAX_RESULTS:5
+   result  : TmsError in 323 ms
+   detail  : TMS error AUTH_FAILED: Invalid or missing auth token
+
+── 5. LOAD_QUERY PICKUP_DT:19990101000000 (must match nothing)
+   request : CMD:LOAD_QUERY|AUTH:<redacted>|PICKUP_DT:19990101000000|MAX_RESULTS:5
+   result  : TmsError in 367 ms
+   detail  : TMS error AUTH_FAILED: Invalid or missing auth token
+
+── 7. LOAD_QUERY MAX_RESULTS:50 (ceiling probe)
+   request : CMD:LOAD_QUERY|AUTH:<redacted>|EQTYPE:DRY_VAN|MAX_RESULTS:50
+   result  : TmsError in 367 ms
+   detail  : TMS error AUTH_FAILED: Invalid or missing auth token
+
+========================================================================
+FINDINGS
+========================================================================
+encoder   : FAILED against the live server -> TMS error AUTH_FAILED: Invalid or missing auth token
+padding   : no baseline record to inspect
+detail    : LOAD_GET returned no record (skipped, no baseline load)
+FLATBED   : TmsError -> TMS error AUTH_FAILED: Invalid or missing auth token
+PICKUP_DT : TmsError -> TMS error AUTH_FAILED: Invalid or missing auth token
+faults    : DEBUG_ECHO (encoder sanity only): TmsError, LOAD_QUERY baseline: TmsError, LOAD_QUERY EQTYPE:FLATBED: TmsError, LOAD_QUERY PICKUP_DT:19990101000000 (must match nothing): TmsError, LOAD_QUERY MAX_RESULTS:50 (ceiling probe): TmsError
+
+No LOAD_BOOK was sent. This script is read-only by construction.

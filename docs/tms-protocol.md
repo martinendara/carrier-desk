@@ -73,6 +73,35 @@ The server may add categories without notice.
 | `MAX_BUY` vs `RATE` | 1950 vs 2150 (ceiling below posted) | 2528 vs 2073 (ceiling above posted) |
 | Faults | — | none observed in 3 query calls |
 
+## Observed vs. manual (2026-10-01) — BLOCKED, token rejected
+
+`scripts/tms_smoke.py` could not complete: **every request is rejected with
+`AUTH_FAILED`**, so none of the open questions below were answered.
+
+| Aspect | Manual | Observed today |
+|---|---|---|
+| Transport | TCP, one request per connection | reachable, round trip ≈ 360 ms to `tramway.proxy.rlwy.net:17159` |
+| Auth | `AUTH:<token>` on every request | `ERR\|CODE:AUTH_FAILED\|MSG:Invalid or missing auth token` for every command |
+| `MAX_RESULTS` ceiling | undisclosed | **not measured** |
+| `PICKUP_DT` filter name | "not confirmed — test `PICKUP_DT`" | **not measured** |
+| `FLATBED` equipment value | "likely — confirm" | **not measured** |
+| Live padding | full detail has `MAX_BUY` | **not measured**; the 2026-09-30 samples above are still the only ones |
+
+### What was ruled out
+The rejection is **not** on our side. A hand-built frame — 45 bytes,
+`CMD:DEBUG_ECHO|AUTH:<token>\r\n`, written straight to a socket with nothing from
+`app/tms` involved — gets the same `AUTH_FAILED`. The `.env` parse is also clean:
+one `TMS_TOKEN` line, no BOM, no `\r`, no `export` prefix, no quotes, no surrounding
+whitespace, and the loaded value is byte-identical to the file.
+
+### What is left
+The token value itself is being refused. It worked on 2026-09-30 from another
+terminal, which points at a rotated or expired demo token rather than a bad paste.
+Re-run `.venv/bin/python scripts/tms_smoke.py --out docs/smoke-<date>.txt` with a
+fresh token; the script answers all four open questions in one pass.
+
+Full output: `docs/smoke-2026-10-01.txt`.
+
 ## Live samples (2026-09-30)
 ```
 CMD:DEBUG_ECHO|AUTH:<token>
