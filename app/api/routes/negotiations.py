@@ -33,6 +33,7 @@ _SAY = {
     NegotiationAction.ACCEPT: phrasing.OFFER_ACCEPT,
     NegotiationAction.COUNTER: phrasing.OFFER_COUNTER,
     NegotiationAction.CLOSE: phrasing.OFFER_CLOSE,
+    NegotiationAction.CLARIFY: phrasing.ASK_CLARIFY,
 }
 
 
@@ -59,7 +60,7 @@ def open_negotiation(
     return NegotiationOpenResponse(
         load_id=offer.load_id,
         offer=offer.offer,
-        say=phrasing.OFFER_OPEN.format(amount=offer.offer),
+        say=phrasing.OFFER_OPEN.format(amount=phrasing.spoken_amount(offer.offer)),
     )
 
 
@@ -80,16 +81,21 @@ def counter_offer(
 
     decision = container.negotiation.counter(payload.run_id, payload.carrier_ask)
 
-    # Only a close is a terminal result; accept and counter leave the call open.
+    # Only a close is a terminal result; accept, counter and clarify leave the
+    # call open.
     result_code = (
         ResultCode.NEGOTIATION_FAILED.value
         if decision.action is NegotiationAction.CLOSE
         else None
     )
 
+    say = _SAY[decision.action]
+    if decision.action in (NegotiationAction.ACCEPT, NegotiationAction.COUNTER):
+        say = say.format(amount=phrasing.spoken_amount(decision.amount))
+
     return NegotiationCounterResponse(
         action=decision.action.value,
         amount=decision.amount,
         result_code=result_code,
-        say=_SAY[decision.action].format(amount=decision.amount),
+        say=say,
     )

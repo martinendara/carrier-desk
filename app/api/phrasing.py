@@ -70,10 +70,66 @@ LOADS_FOUND = "I've got {count} load{s} that could work."
 
 # --- negotiation --------------------------------------------------------
 
-OFFER_OPEN = "I can offer {amount} dollars on that load."
-OFFER_ACCEPT = "Great, we're agreed at {amount} dollars."
-OFFER_COUNTER = "I can go up to {amount} dollars."
+#: Numbers to words, so a rate is read the way a dispatcher says it and the
+#: ear cannot mishear "ten fifty" as "two fifty".
+_ONES = [
+    "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen",
+]
+_TENS = [
+    "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty",
+    "ninety",
+]
+
+
+def _spell_under_100(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    tens, ones = divmod(n, 10)
+    return _TENS[tens] + ("-" + _ONES[ones] if ones else "")
+
+
+def _spell_full(n: int) -> str:
+    """The whole number in words, e.g. 1050 -> 'one thousand fifty'."""
+    thousands, rem = divmod(n, 1000)
+    hundreds, rest = divmod(rem, 100)
+    parts = []
+    if thousands:
+        parts.append(f"{_ONES[thousands]} thousand")
+    if hundreds:
+        parts.append(f"{_ONES[hundreds]} hundred")
+    if rest:
+        parts.append(_spell_under_100(rest))
+    return " ".join(parts)
+
+
+def spoken_amount(n: int) -> str:
+    """A rate the way a dispatcher says it, with the full number for the ear.
+
+    ``1050`` -> ``ten fifty, that's one thousand fifty dollars``;
+    ``1500`` -> ``fifteen hundred dollars``;
+    ``975``  -> ``nine seventy-five dollars``.
+    """
+    n = int(n)
+    if n <= 0:
+        return "zero dollars"
+    hundreds, remainder = divmod(n, 100)
+    if remainder == 0:
+        return f"{_spell_under_100(hundreds)} hundred dollars"
+    if hundreds == 0:
+        return f"{_spell_under_100(remainder)} dollars"
+    trucking = f"{_spell_under_100(hundreds)} {_spell_under_100(remainder)}"
+    if n >= 1000:
+        return f"{trucking}, that's {_spell_full(n)} dollars"
+    return f"{trucking} dollars"
+
+
+OFFER_OPEN = "I can offer {amount} on that load."
+OFFER_ACCEPT = "Great, we're agreed at {amount}."
+OFFER_COUNTER = "I can go up to {amount}."
 OFFER_CLOSE = "I can't go higher than that on this one. Let me have someone follow up."
+ASK_CLARIFY = "Sorry, I want to make sure I heard you right. What rate are you asking for?"
 
 # --- booking and handoff ------------------------------------------------
 

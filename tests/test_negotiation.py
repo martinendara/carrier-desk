@@ -549,3 +549,51 @@ def test_a_different_ask_within_the_window_is_a_new_round(store):
     second = engine.counter(run_id, 3100)
 
     assert second.round_number == 2
+
+
+# --- clarify -------------------------------------------------------------
+
+
+def test_an_ask_far_below_the_offer_is_clarified(store):
+    """A misheard number (e.g. 'ten fifty' heard as 550) must not be accepted."""
+    engine, offer, run_id = opened(store)
+
+    decision = engine.counter(run_id, offer.offer * 3 // 4)  # 75% of the offer
+
+    assert decision.action is NegotiationAction.CLARIFY
+    assert decision.amount is None
+    assert store.require(run_id).negotiations[-1].round_number == 0
+
+
+def test_a_clarify_does_not_consume_a_round(store):
+    """After a clarify, the next ask is still round 1."""
+    engine, offer, run_id, clock = opened_timed(store)
+
+    engine.counter(run_id, offer.offer * 3 // 4)  # clarify
+    clock.advance(seconds=16)
+    decision = engine.counter(run_id, offer.offer)  # a normal ask
+
+    assert decision.action is NegotiationAction.ACCEPT
+    assert decision.round_number == 1
+
+
+def test_an_ask_at_the_threshold_is_not_clarified(store):
+    """At 80% of the offer the normal accept path still runs."""
+    engine, offer, run_id = opened(store)
+
+    decision = engine.counter(run_id, offer.offer * 4 // 5)  # exactly 80%
+
+    assert decision.action is not NegotiationAction.CLARIFY
+    assert decision.action is NegotiationAction.ACCEPT
+
+
+def test_a_retry_of_a_clarify_replays_the_clarify(store):
+    engine, offer, run_id, clock = opened_timed(store)
+
+    first = engine.counter(run_id, offer.offer * 3 // 4)
+    clock.advance(seconds=2)
+    replay = engine.counter(run_id, offer.offer * 3 // 4)
+
+    assert first.action is NegotiationAction.CLARIFY
+    assert replay == first
+    assert store.require(run_id).negotiations[-1].round_number == 0

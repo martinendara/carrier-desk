@@ -57,6 +57,9 @@ class NegotiationAction(str, Enum):
     ACCEPT = "accept"
     COUNTER = "counter"
     CLOSE = "close"
+    #: The ask is so far below the current offer that it reads as a misheard
+    #: number; ask the carrier to repeat instead of accepting or countering.
+    CLARIFY = "clarify"
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,8 @@ class Decision:
     """The answer to one carrier request."""
 
     action: NegotiationAction
-    amount: int
+    #: The rate, the counter, or the last offer. None for a clarify.
+    amount: int | None
     round_number: int
 
     @property
@@ -208,6 +212,14 @@ class NegotiationEngine:
             return replay
 
         negotiation = self._active_or_raise(run_id, session.negotiations)
+
+        # A number this far below the offer is probably misheard — "ten fifty"
+        # heard as "two fifty". Ask, and do not spend a round on it.
+        if ask < negotiation.current_offer * 4 // 5:
+            return self._remember(
+                negotiation, ask, self._clarify(session, negotiation, ask)
+            )
+
         negotiation.round_number += 1
         round_number = negotiation.round_number
         negotiation.updated_at = self._clock()
@@ -298,7 +310,7 @@ class NegotiationEngine:
         negotiation = session.negotiations[-1]
         if negotiation.last_counter_ask != ask:
             return None
-        if negotiation.last_counter_action is None or negotiation.last_counter_amount is None:
+        if negotiation.last_counter_action is None:
             return None
         if negotiation.last_counter_at is None:
             return None
@@ -317,6 +329,26 @@ class NegotiationEngine:
         negotiation.last_counter_amount = decision.amount
         negotiation.last_counter_at = self._clock()
         return decision
+
+    def _clarify(self, session, negotiation: NegotiationSession, ask: int) -> Decision:
+        """Ask the carrier to repeat the number. No round is consumed."""
+        self._sink.emit(
+            session.run_id,
+            EventType.NEGOTIATION_ROUND,
+            negotiation_id=negotiation.negotiation_id,
+            load_id=negotiation.load_id,
+            round=negotiation.round_number,
+            action=NegotiationAction.CLARIFY.value,
+            result_code="ask_clarify",
+            carrier_ask=ask,
+            offer=negotiation.current_offer,
+            ceiling=negotiation.ceiling,
+        )
+        return Decision(
+            action=NegotiationAction.CLARIFY,
+            amount=None,
+            round_number=negotiation.round_number,
+        )
 
     def _accept(
         self,

@@ -726,6 +726,24 @@ def test_a_close_carries_the_negotiation_failed_code(api):
     assert body["result_code"] == "negotiation_failed"
 
 
+def test_a_far_too_low_ask_is_clarified(api):
+    """A misheard number must be repeated, not booked at the wrong rate."""
+    client, _ = api
+    load_id = _negotiable_load(client)
+    client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
+
+    body = client.post(
+        "/negotiations/counter",
+        json={"run_id": "run-1", "carrier_ask": 500},
+        headers=HEADERS,
+    ).json()
+
+    assert body["action"] == "clarify"
+    assert body["amount"] is None
+    assert body["result_code"] is None
+    assert "heard you right" in body["say"]
+
+
 def test_a_fourth_round_is_refused(api):
     client, _ = api
     load_id = _negotiable_load(client)
@@ -772,7 +790,9 @@ def test_a_nonsense_ask_is_refused(api):
 # --- booking ------------------------------------------------------------
 
 
-def _agree_a_rate(client, run_id: str = "run-1", ask: int = 2500):
+def _agree_a_rate(client, run_id: str = "run-1", ask: int = 5000):
+    # ask must be at or below the opening offer (5125) but not so far below it
+    # that the clarify guard fires (< 80%).
     load_id = _negotiable_load(client, run_id)
     client.post("/negotiations", json={"run_id": run_id, "load_id": load_id}, headers=HEADERS)
     decision = client.post(
