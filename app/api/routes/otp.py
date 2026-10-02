@@ -70,9 +70,12 @@ def send_otp(
     dispatch = container.otp.send(payload.run_id, session.mc_number)
 
     if dispatch.status is DispatchStatus.SENT:
-        say = phrasing.OTP_SENT.format(
-            spoken=spoken_destination(dispatch.masked_destination)
-        )
+        if dispatch.reviewer:
+            say = phrasing.OTP_SENT_REVIEWER
+        else:
+            say = phrasing.OTP_SENT.format(
+                spoken=spoken_destination(dispatch.masked_destination)
+            )
     else:
         say = _SAY_BY_STATUS.get(dispatch.status, phrasing.OTP_LOCKED)
 

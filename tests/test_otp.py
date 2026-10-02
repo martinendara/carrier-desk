@@ -207,6 +207,48 @@ def test_a_failed_email_is_send_failed_and_issues_nothing(store, tick):
     assert store.get("run-1").otp is None
 
 
+# --- reviewer mode ------------------------------------------------------
+
+
+def test_reviewer_mc_gets_a_fixed_code_without_email(store, tick):
+    mailer = FakeMailer()
+    service = make_service(
+        store, tick, mailer=mailer, reviewer_mc="15735", reviewer_otp="000000"
+    )
+
+    dispatch = service.send("run-1", "15735")
+
+    assert dispatch.status is DispatchStatus.SENT
+    assert dispatch.reviewer is True
+    assert dispatch.masked_destination is None
+    assert mailer.sent == []  # no email is sent
+    assert service.verify("run-1", "000000").verified
+
+
+def test_reviewer_mode_does_not_affect_other_mcs(store, tick):
+    mailer = FakeMailer()
+    service = make_service(
+        store, tick, mailer=mailer, reviewer_mc="15735", reviewer_otp="000000"
+    )
+
+    dispatch = service.send("run-1", KNOWN_MC)
+
+    assert dispatch.status is DispatchStatus.SENT
+    assert dispatch.reviewer is False
+    assert len(mailer.sent) == 1  # a real email is sent
+
+
+def test_reviewer_event_is_flagged(store, tick, events):
+    service = make_service(
+        store, tick, events, reviewer_mc="15735", reviewer_otp="000000"
+    )
+
+    service.send("run-1", "15735")
+
+    (event,) = events.of_type(EventType.OTP_SENT)
+    assert event.payload["reviewer"] is True
+
+
 # --- verifying ----------------------------------------------------------
 
 

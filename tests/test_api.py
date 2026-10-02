@@ -412,6 +412,21 @@ def test_the_sent_say_reads_naturally_in_voice(api):
     assert "*" not in body["say"]
 
 
+def test_reviewer_send_uses_the_fixed_code_and_say():
+    with api_app(reviewer_mode=True, reviewer_mc="15735", reviewer_otp="000000") as (client, _):
+        verify_carrier(client, "run-1", "15735")
+
+        body = client.post("/otp/send", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+        assert body["status"] == "sent"
+        assert "Please read me the six digits" in body["say"]
+
+        checked = client.post(
+            "/otp/verify", json={"run_id": "run-1", "code": "000000"}, headers=HEADERS
+        ).json()
+        assert checked["verified"] is True
+
+
 def test_send_without_a_prior_verify_is_locked(api):
     """The MC comes from verify_carrier; without it there is nothing to send to."""
     client, _ = api

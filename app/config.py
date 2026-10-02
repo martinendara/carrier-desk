@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     #: the plaintext code never transits the platform.
     resend_api_key: SecretStr = SecretStr("")
     resend_timeout_seconds: float = 5.0
+
+    # --- Reviewer mode --------------------------------------------------
+    #: Evaluation-only: a fixed OTP for one MC so an evaluator can run a full
+    #: call without the operator's inbox. Off by default; never enabled in
+    #: production.
+    reviewer_mode: bool = False
+    reviewer_mc: str = ""
+    reviewer_otp: SecretStr = SecretStr("")
     #: Attempts allowed per MC per hour, across every call. The per-call lock is
     #: three; without this, a new run_id buys three more.
     otp_verify_rate_limit_per_hour: int = 5

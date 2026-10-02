@@ -1124,3 +1124,21 @@ client's provider behind the same `Mailer` interface.
 
 **Why.** The code never leaves the server, so there is no place for it to leak — not the
 tool result, not the run log.
+
+---
+
+## 59. Reviewer mode: a fixed OTP for one evaluation MC
+
+**Problem.** Evaluators need to run a complete call, but the OTP goes to the operator's
+inbox, which they cannot access.
+
+**Choice.** When `REVIEWER_MODE` is on, one configured MC (`REVIEWER_MC`) gets a fixed code
+from `REVIEWER_OTP`, no email, and a `reviewer=true` flag on the `otp_sent` event. Nothing
+the caller says enables it: only the configured MC matches, and the code still goes through
+the normal HMAC store, three attempts and the OTP gate.
+
+**Rejected.** *A hidden "skip OTP" endpoint.* That is a bypass reachable by anyone who finds
+it. *A fixed code accepted for any MC.* That would let a caller verify any carrier.
+
+**Why.** It is an evaluation tool, not a bypass: off by default, scoped to one MC, and the
+audit trail marks every reviewer code so a rep can tell it apart from a real one.

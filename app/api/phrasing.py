@@ -47,6 +47,7 @@ CARRIER_UNVERIFIED = "I can't verify your authority right now. Let me have someo
 # --- OTP ----------------------------------------------------------------
 
 OTP_SENT = "I just emailed you a six digit code. It went to the address we have on file, {spoken}."
+OTP_SENT_REVIEWER = "I've sent a six digit code to the contact we have on file. Please read me the six digits."
 OTP_NOT_VERIFIED = "I need to confirm your carrier first before I can send a code."
 OTP_SEND_FAILED = "I couldn't send the code right now. Let me get a colleague to help."
 OTP_ROUTED_ONBOARDING = (

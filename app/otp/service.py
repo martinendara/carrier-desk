@@ -73,6 +73,8 @@ class OtpDispatch:
     status: DispatchStatus
     run_id: str
     masked_destination: str | None = None
+    #: Evaluation-only: a fixed code, no email. Never set on a real carrier.
+    reviewer: bool = False
 
     @property
     def agent_view(self) -> dict[str, object]:
@@ -122,6 +124,8 @@ class OtpService:
         lookup: Callable[[str], directory.CarrierContact | None] = directory.lookup,
         clock: Callable[[], datetime] = utcnow,
         sink: EventSink | None = None,
+        reviewer_mc: str | None = None,
+        reviewer_otp: str | None = None,
     ) -> None:
         if not secret or len(secret) < MIN_SECRET_BYTES:
             raise WeakSecretError(
@@ -136,6 +140,9 @@ class OtpService:
         self._lookup = lookup
         self._clock = clock
         self._sink: EventSink = sink or NullEventSink()
+        #: Evaluation-only reviewer credentials. None disables reviewer mode.
+        self._reviewer_mc = reviewer_mc.strip() if reviewer_mc else None
+        self._reviewer_otp = reviewer_otp.strip() if reviewer_otp else None
 
     @classmethod
     def from_settings(
@@ -152,6 +159,8 @@ class OtpService:
             max_attempts=settings.otp_max_attempts,
             max_resends=settings.otp_max_resends,
             sink=sink,
+            reviewer_mc=settings.reviewer_mc if settings.reviewer_mode else None,
+            reviewer_otp=settings.reviewer_otp.get_secret_value() if settings.reviewer_mode else None,
         )
 
     # --- sending --------------------------------------------------------
@@ -164,6 +173,12 @@ class OtpService:
         """
         session = self._store.get_or_create(run_id)
         mc = str(mc_number).strip()
+        session.mc_number = mc
+
+        if self._reviewer_mc is not None and mc == self._reviewer_mc:
+            # Reviewer mode: a fixed code, no contact, no email. Nothing the
+            # caller says enables it — only the configured MC matches.
+            return self._issue(session, None, reviewer=True, code=self._reviewer_otp)
 
         contact = self._lookup(mc)
         if contact is None:
@@ -175,7 +190,6 @@ class OtpService:
                 status=DispatchStatus.ROUTED_ONBOARDING, run_id=session.run_id
             )
 
-        session.mc_number = mc
         return self._issue(session, contact)
 
     def resend(self, run_id: str) -> OtpDispatch:
@@ -184,6 +198,9 @@ class OtpService:
         if session.mc_number is None:
             raise SessionNotFound(f"run {run_id!r} has no MC on file to resend to")
 
+        if self._reviewer_mc is not None and session.mc_number == self._reviewer_mc:
+            return self._issue(session, None, reviewer=True, code=self._reviewer_otp)
+
         contact = self._lookup(session.mc_number)
         if contact is None:
             return OtpDispatch(
@@ -191,7 +208,14 @@ class OtpService:
             )
         return self._issue(session, contact)
 
-    def _issue(self, session: RunSession, contact: directory.CarrierContact) -> OtpDispatch:
+    def _issue(
+        self,
+        session: RunSession,
+        contact: directory.CarrierContact | None,
+        *,
+        reviewer: bool = False,
+        code: str | None = None,
+    ) -> OtpDispatch:
         existing = session.otp
 
         if existing is not None:
@@ -209,26 +233,33 @@ class OtpService:
                 )
 
         now = self._clock()
-        code = generate_code()
+        if code is None:
+            code = generate_code()
 
-        # Send first, store second: if the email fails, nothing was issued and
-        # the resend budget is untouched.
-        try:
-            self._mailer.send(
-                OutboundEmail(
-                    to=contact.email,
-                    subject=OTP_EMAIL_SUBJECT,
-                    body=OTP_EMAIL_BODY.format(code=code),
+        if not reviewer:
+            # Send first, store second: if the email fails, nothing was issued
+            # and the resend budget is untouched.
+            try:
+                self._mailer.send(
+                    OutboundEmail(
+                        to=contact.email,
+                        subject=OTP_EMAIL_SUBJECT,
+                        body=OTP_EMAIL_BODY.format(code=code),
+                    )
                 )
-            )
-        except MailError:
-            logger.warning("OTP email for %s could not be sent", mask_email(contact.email))
-            return OtpDispatch(status=DispatchStatus.SEND_FAILED, run_id=session.run_id)
+            except MailError:
+                logger.warning(
+                    "OTP email for %s could not be sent", mask_email(contact.email)
+                )
+                return OtpDispatch(
+                    status=DispatchStatus.SEND_FAILED, run_id=session.run_id
+                )
 
+        destination = contact.email if contact else "reviewer@example.com"
         challenge = OtpChallenge(
             code_hmac=hash_code(self._secret, session.run_id, code),
-            destination=contact.email,
-            masked_destination=mask_email(contact.email),
+            destination=destination,
+            masked_destination=mask_email(destination),
             created_at=now,
             expires_at=now + timedelta(seconds=self._ttl),
             max_attempts=self._max_attempts,
@@ -241,21 +272,23 @@ class OtpService:
         session.otp = challenge
         session.touch()
 
-        self._sink.emit(
-            session.run_id,
-            EventType.OTP_SENT,
-            mc_number=session.mc_number,
+        event_kwargs: dict[str, object] = {
+            "mc_number": session.mc_number,
             # Masked: an event log is internal, but it is still a place PII
             # accumulates for no benefit.
-            destination=challenge.masked_destination,
-            resend=existing is not None,
-            expires_at=challenge.expires_at.isoformat(),
-        )
+            "destination": challenge.masked_destination,
+            "resend": existing is not None,
+            "expires_at": challenge.expires_at.isoformat(),
+        }
+        if reviewer:
+            event_kwargs["reviewer"] = True
+        self._sink.emit(session.run_id, EventType.OTP_SENT, **event_kwargs)
 
         return OtpDispatch(
             status=DispatchStatus.SENT,
             run_id=session.run_id,
-            masked_destination=challenge.masked_destination,
+            masked_destination=None if reviewer else challenge.masked_destination,
+            reviewer=reviewer,
         )
 
     # --- verifying ------------------------------------------------------
