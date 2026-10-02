@@ -639,3 +639,50 @@ Updated:
 6. **Process-local state** (sessions, handoff queue, rate limiter) — unchanged.
 7. **A restart loses in-flight calls.** Unchanged.
 8. **The free tier sleeps.** Unchanged.
+
+---
+
+## QA run — script (2026-10-02)
+
+**Status:** the QA driver is written and smoke-tested; the production run is gated on the
+operator (see below).
+
+### What was added
+
+- `scripts/qa_run.py` — drives the 8-tool HTTP surface exactly as the voice agent would,
+  asserting each scenario's expected outcome. Reads `QA_BASE_URL` / `QA_API_KEY` /
+  `QA_REVIEWER_MC` / `QA_REVIEWER_OTP` from the environment, so nothing secret enters the
+  repo. Exit code 0 iff every scenario passes.
+- 22 end-to-end scenarios: 5 standard (book at first offer, after 1/2/3 counters, urgent),
+  6 edges (FMCSA inactive, OTP 3× fail, no match, no deal, clarify, idempotent counter and
+  book), 11 adversarial (no-OTP 403s, send before verify, `mc_number`/`agreed_rate` 422,
+  over-ceiling never accepted, not-shown load 409, 4th round 409, cross-run isolation 409).
+
+### Re-runnability (the simple answer)
+
+The run is repeatable because the deployment serves `TMS_MODE=fake` seeded from
+`tms_demo.txt` (20 loads), and the fake server never removes a booked load from search —
+booking does not deplete the pool. Every scenario uses a fresh `qa-<name>` run_id, and the
+`qa-` prefix keeps its events out of the live KPIs (`source='qa'`). Nothing to build; the
+script just relies on those two invariants.
+
+### Two scenarios are pytest-only, not end-to-end
+
+- **Onboarding (`routed_onboarding`)** — per the approved plan, covered in pytest
+  (`test_api.py`, `test_otp.py`, `test_call_flow.py`), not driven against production.
+- **`booking_pending` on a TMS fault** — needs an injected `LOAD_BOOK` fault, which the
+  production fake TMS (normal mode) never produces. Covered in pytest (`test_api.py`).
+
+### Smoke test
+
+`scripts/qa_run.py` was run against a local instance (fake TMS + mocked FMCSA + reviewer
+mode): **22/22 passed**. Full suite: **554 passed**.
+
+### Before the production run (operator checkpoint)
+
+1. Raise `OTP_VERIFY_RATE_LIMIT_PER_HOUR` (default 5) or exempt reviewer mode — the QA
+   reuses reviewer MC 15735 for ~18 verifies and will otherwise 429 after the 5th.
+2. Confirm the deploy is at the commit with `tms_demo.txt` and has
+   `TMS_FAKE_FIXTURES=tests/fixtures/tms_demo.txt`.
+3. Paste `twin/schema.sql` into Twin (the `source` column and live-only time metric are in
+   it), and clean prior `qa-%` rows before the run.
