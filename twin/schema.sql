@@ -189,6 +189,7 @@ handed AS (
 )
 SELECT
     b.run_id,
+    CASE WHEN b.run_id LIKE 'qa-%' THEN 'qa' ELSE 'live' END AS source,
     b.started_at,
     b.ended_at,
     f.mc_number,
@@ -255,7 +256,7 @@ identity AS (
 time_to_offer AS (
     SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY seconds_to_first_offer)
              AS median_seconds_to_first_offer
-    FROM calls WHERE seconds_to_first_offer IS NOT NULL
+    FROM calls WHERE seconds_to_first_offer IS NOT NULL AND source = 'live'
 ),
 onboarding AS (
     SELECT count(*) AS onboarding_leads
