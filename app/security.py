@@ -12,7 +12,7 @@ import hmac
 import logging
 from typing import Callable
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from app.api import phrasing
 
@@ -29,6 +29,7 @@ def build_api_key_dependency(expected_key: str) -> Callable[..., None]:
     """
 
     def require_api_key(
+        request: Request,
         x_api_key: str | None = Header(default=None, alias=API_KEY_HEADER),
     ) -> None:
         if not expected_key:
@@ -43,6 +44,11 @@ def build_api_key_dependency(expected_key: str) -> Callable[..., None]:
         if x_api_key is None or not hmac.compare_digest(x_api_key, expected_key):
             # Deliberately vague: whether the header was missing or wrong is not
             # something an unauthenticated caller needs to know.
+            logger.warning(
+                "DIAG auth 401 on %s: %s",
+                request.url.path,
+                "missing" if x_api_key is None else "mismatch",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"error": "unauthorized", "say": phrasing.UNAUTHORIZED},

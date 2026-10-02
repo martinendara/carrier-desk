@@ -20,7 +20,7 @@ from app.api.schemas import (
     OtpVerifyResponse,
 )
 from app.container import Container
-from app.otp import DispatchStatus, OtpFailure
+from app.otp import DispatchStatus, OtpFailure, spoken_destination
 from app.results import ResultCode
 
 router = APIRouter(tags=["otp"])
@@ -70,7 +70,9 @@ def send_otp(
     dispatch = container.otp.send(payload.run_id, session.mc_number)
 
     if dispatch.status is DispatchStatus.SENT:
-        say = phrasing.OTP_SENT.format(masked=dispatch.masked_destination)
+        say = phrasing.OTP_SENT.format(
+            spoken=spoken_destination(dispatch.masked_destination)
+        )
     else:
         say = _SAY_BY_STATUS.get(dispatch.status, phrasing.OTP_LOCKED)
 

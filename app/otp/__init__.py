@@ -6,6 +6,7 @@ from app.otp.security import (
     generate_code,
     hash_code,
     mask_email,
+    spoken_destination,
     verify_code,
 )
 from app.otp.service import (
@@ -33,5 +34,6 @@ __all__ = [
     "generate_code",
     "hash_code",
     "mask_email",
+    "spoken_destination",
     "verify_code",
 ]

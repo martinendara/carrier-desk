@@ -64,3 +64,19 @@ def mask_email(email: str) -> str:
     if not domain:
         return "***"
     return f"{local[:1]}***@{domain}"
+
+
+def spoken_destination(masked: str) -> str:
+    """A masked address, rendered the way a voice should say it.
+
+    ``m***@gmail.com`` -> ``the one starting with M at Gmail``. The masked form
+    already hides everything but the first letter and the domain, so this only
+    rephrases what is safe to say out loud — the agent never reads asterisks.
+    """
+    text = str(masked).strip()
+    if "@" not in text:
+        return "the address we have on file"
+    local, _, domain = text.rpartition("@")
+    first = (local[:1] or "?").upper()
+    domain_phrase = "Gmail" if domain.lower() == "gmail.com" else domain.removesuffix(".com")
+    return f"the one starting with {first} at {domain_phrase}"

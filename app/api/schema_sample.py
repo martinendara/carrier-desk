@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from app.api.schemas import (
     BookingResponse,
+    CarrierVerifyResponse,
     HandoffResponse,
     LoadSearchResponse,
     NegotiationCounterResponse,
@@ -47,6 +48,15 @@ SAMPLE_LOAD: dict[str, object] = {
     "dims": "48x40x48",
     "notes": "",
 }
+
+
+def sample_verify_carrier() -> CarrierVerifyResponse:
+    return CarrierVerifyResponse(
+        eligible=True,
+        result_code=None,
+        legal_name="SAMPLE CARRIER LLC",
+        say="Thanks, I've found your carrier record.",
+    )
 
 
 def sample_send_otp() -> OtpSendResponse:

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.api import phrasing
 from app.api.deps import get_container, session_for
+from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_verify_carrier
 from app.api.schemas import CarrierVerifyRequest, CarrierVerifyResponse
 from app.container import Container
 from app.events import EventType
@@ -35,6 +36,9 @@ def verify_carrier(
     to verify, and it is also what tells us whether there is a contact to send a
     code to.
     """
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_verify_carrier()
+
     session = session_for(container, payload.run_id)
     check = container.fmcsa.check(payload.mc_number)
 

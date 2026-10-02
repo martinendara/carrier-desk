@@ -402,6 +402,16 @@ def test_send_returns_the_agent_facing_view_only(api):
     assert len(container.otp._mailer.last_code) == 6
 
 
+def test_the_sent_say_reads_naturally_in_voice(api):
+    client, _ = api
+    verify_carrier(client, "run-1")
+
+    body = client.post("/otp/send", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert "the one starting with" in body["say"]
+    assert "*" not in body["say"]
+
+
 def test_send_without_a_prior_verify_is_locked(api):
     """The MC comes from verify_carrier; without it there is nothing to send to."""
     client, _ = api
@@ -1109,6 +1119,7 @@ def test_live_tms_is_fine_in_production():
         tms_token="not-a-real-token",
         service_api_key=API_KEY,
         otp_hmac_secret=SECRET,
+        resend_api_key="re_test_key",
         events_jsonl_path="memory",
     )
     app = create_app(settings)
@@ -1134,6 +1145,7 @@ def test_live_tms_without_host_is_refused_in_production():
                 tms_token="not-a-real-token",
                 service_api_key=API_KEY,
                 otp_hmac_secret=SECRET,
+                resend_api_key="re_test_key",
                 events_jsonl_path="memory",
             )
         )
@@ -1231,6 +1243,27 @@ def test_an_empty_otp_secret_is_refused_in_production():
         )
 
     assert "OTP_HMAC_SECRET" in str(caught.value)
+
+
+def test_an_empty_resend_key_is_refused_in_production():
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="production",
+                tms_mode="live",
+                tms_host="tms.example.test",
+                tms_port=1234,
+                tms_token="token",
+                service_api_key=API_KEY,
+                otp_hmac_secret=SECRET,
+                resend_api_key="",
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "RESEND_API_KEY" in str(caught.value)
 
 
 def test_the_tms_mode_guard_is_reported_first():

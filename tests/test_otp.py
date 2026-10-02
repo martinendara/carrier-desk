@@ -20,6 +20,7 @@ from app.otp import (
     generate_code,
     hash_code,
     mask_email,
+    spoken_destination,
     verify_code,
 )
 
@@ -65,6 +66,23 @@ def test_masking_never_leaks_the_local_part():
 
     assert "ispatch" not in masked
     assert "ridgelinefreight.com" in masked
+
+
+@pytest.mark.parametrize(
+    ("masked", "expected"),
+    [
+        ("m***@gmail.com", "the one starting with M at Gmail"),
+        ("d***@ridgelinefreight.com", "the one starting with D at ridgelinefreight"),
+        ("a***@b.co", "the one starting with A at b.co"),
+    ],
+)
+def test_spoken_destination_reads_naturally(masked, expected):
+    """A voice should never read asterisks, so the say is rephrased."""
+    assert spoken_destination(masked) == expected
+
+
+def test_spoken_destination_never_reads_asterisks():
+    assert "*" not in spoken_destination("m***@gmail.com")
 
 
 # --- generation and storage ---------------------------------------------
