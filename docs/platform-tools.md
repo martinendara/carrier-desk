@@ -1,0 +1,422 @@
+# Platform tools — HappyRobot workflow reference
+
+One card per agent tool, in call order. `verify_carrier` already exists in the
+workflow and is the model these follow (see `docs/workflow-sample.json`). Build
+each of the rest the same way: a **Tool** node the agent calls, with a **Webhook**
+child node that does the HTTP call.
+
+## Conventions (identical for every tool)
+
+**Chips.**
+
+- `{{SERVICE_BASE_URL}}` — use-case variable, e.g. `https://carrier-desk.onrender.com`.
+- `{{SERVICE_API_KEY}}` — use-case variable; sent as the `X-API-Key` header.
+- `{{run_id}}` — **Fixed value**, bound to the platform's Run ID chip
+  (`group: current`, `variable: run_id`). The agent never sees or sets it.
+- `{{$var:<tool>.<param>}}` — a value from the tool node's own parameters; the
+  child-node body references it by the tool node's persistent id, exactly as
+  `verify_carrier`'s body does.
+
+**Child node (Webhook) — shared.** Every tool's child node is a Webhook action
+with `authType: none`, `contentType: application/json`, `webhookSchemaVersion: 2`,
+and the header `X-API-Key: {{SERVICE_API_KEY}}`. Only the method, URL/params and
+body differ.
+
+**`run_id`.** Always the only **Fixed value** parameter, bound to the Run ID
+chip. Every other parameter is **Agent decides** (filled from the conversation).
+
+**Response audience.** `say` is always agent-facing — it is the sentence the
+agent relays, in its own words. `result_code` (where present) is the closed-set
+code the *platform* branches on; the agent never reads it out. `delivery` on
+`send_otp` is the one field that is never agent-facing.
+
+**Blocking.** Every tool is blocking: the agent waits for the response before it
+speaks.
+
+---
+
+## 1. `send_otp` — POST `/otp/send`
+
+**Description (agent).** Send a one-time code to the email on file for the
+verified carrier. Call right after `verify_carrier` returns `eligible: true`.
+Do not call before verifying, and do not call again to "retry" a code the caller
+did not receive — a second call is a resend, and there is only one.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `mc_number` | Agent decides | string | `107012` | yes |
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/otp/send`
+- Headers: `X-API-Key: {{SERVICE_API_KEY}}`, `Content-Type: application/json`
+- Body:
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}",
+  "mc_number": "{{$var:<tool>.mc_number}}"
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `status` | Agent | `sent` \| `routed_onboarding` \| `resend_limit_reached` \| `already_verified` \| `locked` |
+| `masked_destination` | Agent | e.g. `m***@gmail.com` — safe to say |
+| `result_code` | Agent (routing) | `null` \| `routed_onboarding` \| `otp_failed` |
+| `say` | Agent | speak this |
+| `delivery` | **Hidden** | `{destination, code}` — plaintext code + full email. **Must not reach the agent.** |
+
+**Retries / blocking / end call.** Retries: 1 (idempotent — but a retry after a
+lost response issues a fresh code, which spends the one resend; acceptable, the
+server caps it). Blocking: yes. End call: no.
+
+**Additional node (required).** The `delivery` object feeds a separate email
+node, not the conversation:
+
+1. Map `delivery.code` and `delivery.destination` into two **hidden Tool Call
+   Result** fields (e.g. `otp_code`, `otp_email`). The agent never sees them.
+2. Add a downstream **HappyRobot Email** node (built-in, no credentials):
+   - **To** (recipient) = `{{otp_email}}`
+   - **Subject** = `Your verification code`
+   - **Body** = short text that includes `{{otp_code}}`
+
+The agent only speaks `say` (`"I've sent a six digit code to …m***@gmail.com."`).
+
+---
+
+## 2. `verify_otp` — POST `/otp/verify`
+
+**Description (agent).** Check the 6-digit code the carrier read back. Call once
+the caller gives the code, after `send_otp`. Do not call before sending, and do
+not re-check a code that already verified.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `code` | Agent decides | string | `483920` | yes |
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/otp/verify`
+- Body:
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}",
+  "code": "{{$var:<tool>.code}}"
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `verified` | Agent | bool — branch on it |
+| `attempts_left` | Agent | for `say` ("…you have N tries left") |
+| `result_code` | Agent (routing) | `null` \| `otp_failed` |
+| `say` | Agent | speak this |
+
+**Retries / blocking / end call.** Retries: 1 (idempotent — a replayed verify on
+an already-verified session returns `verified: true`, not a new attempt).
+Blocking: yes. End call: no.
+
+**Additional node.** None.
+
+---
+
+## 3. `search_loads` — POST `/loads/search`
+
+**Description (agent).** Search matching loads by origin, destination, equipment
+or pickup date. Call only after the OTP is verified. Do not call before
+verification, and do not invent filters the carrier did not give.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `orig_city` | Agent decides | string | `Chicago` | no |
+| `orig_state` | Agent decides | string | `IL` | no |
+| `orig_zip` | Agent decides | string | `60607` | no |
+| `dest_city` | Agent decides | string | `Columbus` | no |
+| `dest_state` | Agent decides | string | `OH` | no |
+| `dest_zip` | Agent decides | string | `43215` | no |
+| `equipment` | Agent decides | string | `DRY_VAN` | no |
+| `pickup_date` | Agent decides | string | `20261003` | no |
+
+At least one filter is required. Only the fields the carrier gave go in the body.
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/loads/search`
+- Body (send only the filters that are filled):
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}",
+  "orig_state": "{{$var:<tool>.orig_state}}",
+  "equipment": "{{$var:<tool>.equipment}}"
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `loads` | Agent | list of up to 3 load objects (see below); **never contains `MAX_BUY`** |
+| `count` | Agent | 0–3 |
+| `result_code` | Agent (routing) | `null` \| `no_match` |
+| `say` | Agent | speak this |
+
+Load object fields (agent-visible): `load_id`, `orig_city`, `orig_state`,
+`orig_zip`, `dest_city`, `dest_state`, `dest_zip`, `pickup_dt`, `eqtype`,
+`rate`, `miles`, `status`.
+
+**Retries / blocking / end call.** Retries: 1 (idempotent read). Blocking: yes.
+End call: no.
+
+**Additional node.** None.
+
+---
+
+## 4. `get_load` — GET `/loads/{load_id}`
+
+**Description (agent).** Get the full detail for one load so you can pitch it
+(rate, dates, commodity, notes). Call for a load that came back from
+`search_loads`. Do not call for a load that was not shown this call.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `load_id` | Agent decides | string | `LD00859` | yes |
+
+**Child node (Webhook).**
+
+- Method: `GET`
+- URL: `{{SERVICE_BASE_URL}}/loads/{{$var:<tool>.load_id}}`
+- Params (query string): `run_id` = `{{$var:<tool>.run_id}}`
+- Body: none
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `load` | Agent | full load object; **`MAX_BUY` is stripped server-side** |
+| `say` | Agent | speak this |
+
+`load` adds `delivery_dt`, `weight`, `commodity`, `pieces`, `dims`, `notes` to
+the search fields. No `max_buy`, ever.
+
+**Retries / blocking / end call.** Retries: 1 (idempotent read). Blocking: yes.
+End call: no.
+
+**Additional node.** None.
+
+---
+
+## 5. `open_negotiation` — POST `/negotiations`
+
+**Description (agent).** Open a negotiation on a load shown this call and get the
+opening offer. Call when the carrier wants to talk price. Do not call for a load
+that was not shown, and do not call before the OTP is verified.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `load_id` | Agent decides | string | `LD00859` | yes |
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/negotiations`
+- Body:
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}",
+  "load_id": "{{$var:<tool>.load_id}}"
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `load_id` | Agent | echo |
+| `offer` | Agent | integer, dollars |
+| `say` | Agent | speak this |
+
+**Retries / blocking / end call.** Retries: 1 (idempotent — reopening returns the
+same offer). Blocking: yes. End call: no.
+
+**Additional node.** None.
+
+---
+
+## 6. `counter_offer` — POST `/negotiations/counter`
+
+**Description (agent).** Send the carrier's counter-offer (a dollar amount) and
+get `accept` / `counter` / `close`. Call once per carrier counter, after
+`open_negotiation`. Do not call to open a negotiation, and do not send a number
+the carrier did not say.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `carrier_ask` | Agent decides | integer | `1750` | yes |
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/negotiations/counter`
+- Body:
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}",
+  "carrier_ask": {{$var:<tool>.carrier_ask}}
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `action` | Agent | `accept` \| `counter` \| `close` |
+| `amount` | Agent | integer, dollars |
+| `say` | Agent | speak this |
+
+Nothing else is returned — no ceiling, no gap, no step. The server owns all of
+that.
+
+**Retries / blocking / end call.** Retries: 1 — safe now: the server replays the
+same decision when the same `carrier_ask` arrives again within 15 s, without
+consuming a round. Blocking: yes. End call: no (on `close`, the prompt routes to
+`handoff`).
+
+**Additional node.** None.
+
+---
+
+## 7. `book_load` — POST `/bookings`
+
+**Description (agent).** Book the load at the rate the carrier accepted. Call
+only after `counter_offer` returned `accept`. Do not call before an accepted
+rate, and do not pass a rate — the server uses the rate it stored, never one the
+agent supplies.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/bookings`
+- Body:
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}"
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `status` | Agent | `booked` \| `booking_pending` |
+| `booking_ref` | Agent (rep-facing) | confirmation ref, or `null` when pending |
+| `result_code` | Agent (routing) | `booked` \| `booking_pending` |
+| `say` | Agent | speak this |
+
+**Retries / blocking / end call.** Retries: **0** — booking is not idempotent:
+each successful `LOAD_BOOK` permanently consumes the load, so a blind retry
+could double-book. Blocking: yes. End call: no — `handoff` still follows; on
+`booking_pending` the agent says a rep confirms, then hands off.
+
+**Additional node.** None.
+
+---
+
+## 8. `handoff` — POST `/handoff`
+
+**Description (agent).** Hand the call to a senior rep. Call when the flow cannot
+proceed — no matching loads, no contact on file, negotiation closed or booking
+pending — or when the carrier asks for a human. Do not call it to skip steps.
+
+**Parameters.**
+
+| name | source | type | example | required |
+|---|---|---|---|---|
+| `run_id` | Fixed value (Run ID chip) | string | — | yes |
+| `reason` | Agent decides | string | `negotiation_failed` | no |
+
+`reason` is optional; any string is accepted and an unrecognised one is recorded
+as `requested`.
+
+**Child node (Webhook).**
+
+- Method: `POST`
+- URL: `{{SERVICE_BASE_URL}}/handoff`
+- Body:
+```json
+{
+  "run_id": "{{$var:<tool>.run_id}}",
+  "reason": "{{$var:<tool>.reason}}"
+}
+```
+
+**Response fields.**
+
+| field | audience | note |
+|---|---|---|
+| `ticket_id` | Agent (rep-facing) | ticket reference |
+| `say` | Agent | speak this |
+
+**Retries / blocking / end call.** Retries: 1 (idempotent — a repeat opens a
+second ticket, harmless). Blocking: yes. End call: yes (terminal — a rep takes
+over).
+
+**Additional node.** None.
+
+---
+
+## Call order
+
+`verify_carrier` (already built) → `send_otp` → `verify_otp` → `search_loads` →
+`get_load` → `open_negotiation` → `counter_offer` → `book_load` → `handoff`.
+
+Gating recap: `verify_carrier`, `send_otp`, `verify_otp` and `handoff` run
+without a verified OTP (handoff is the escape hatch). `search_loads`, `get_load`,
+`open_negotiation`, `counter_offer` and `book_load` all require the OTP to be
+verified for the same `run_id`.
+
+## End call — only `handoff`
+
+`handoff` is the only tool with **end call = yes**. It is the last node of the
+happy path, and every other "this call is over" moment is *conditional* — it ends
+either in a handoff or in a goodbye the agent still has to speak:
+
+- `verify_carrier` (`eligible: false`) — the agent reads the polite `say` and
+  ends, but the outcome is conditional, so it cannot be a blanket end call;
+  leave it to the prompt.
+- `counter_offer` (`action: close`) — the copy is "let me have someone follow
+  up", so it should route to `handoff`, not end the call on the spot.
+- `book_load` — always followed by `handoff` (confirm or pending).
+
+So: leave termination to the prompt everywhere except `handoff`, where the call
+is genuinely handed off and there is nothing left for the agent to say.

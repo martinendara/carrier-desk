@@ -24,7 +24,7 @@ from app.negotiation import (
 )
 from app.sessions import LoadNotShown, NegotiationLimitReached, RunSessionStore
 from helpers import RECORDED_CEILING, RECORDED_LOAD_ID, RECORDED_RATE, make_load
-from conftest import NOW
+from conftest import NOW, TickClock
 
 NORMAL_STEPS = (Fraction(2, 5), Fraction(3, 4))
 URGENT_STEPS = (Fraction(3, 5), Fraction(9, 10))
@@ -53,6 +53,13 @@ def opened(store, events=None, load=None, run_id="run-1", **overrides):
     session.record_shown_load(load.load_id)
     offer = engine.open(run_id, load)
     return engine, offer, run_id
+
+
+def opened_timed(store, events=None, load=None, run_id="run-1", **overrides):
+    """Like `opened`, but with a clock the test advances past the replay window."""
+    clock = TickClock(NOW)
+    engine, offer, rid = opened(store, events, load, run_id, clock=clock, **overrides)
+    return engine, offer, rid, clock
 
 
 # --- floor25 and the opening offer --------------------------------------
@@ -278,10 +285,12 @@ def test_a_request_at_the_step_is_accepted_at_the_request(store):
 
 
 def test_three_rounds_without_agreement_close_the_call(store, events):
-    engine, _, run_id = opened(store, events)
+    engine, _, run_id, clock = opened_timed(store, events)
 
     assert engine.counter(run_id, 3000).action is NegotiationAction.COUNTER
+    clock.advance(seconds=16)
     assert engine.counter(run_id, 3000).action is NegotiationAction.COUNTER
+    clock.advance(seconds=16)
     final = engine.counter(run_id, 3000)
 
     assert final.action is NegotiationAction.CLOSE
@@ -290,9 +299,11 @@ def test_three_rounds_without_agreement_close_the_call(store, events):
 
 
 def test_the_final_round_accepts_anything_up_to_the_ceiling(store):
-    engine, _, run_id = opened(store)
+    engine, _, run_id, clock = opened_timed(store)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
 
     decision = engine.counter(run_id, RECORDED_CEILING)
 
@@ -301,9 +312,11 @@ def test_the_final_round_accepts_anything_up_to_the_ceiling(store):
 
 
 def test_the_final_round_closes_above_the_ceiling(store):
-    engine, _, run_id = opened(store)
+    engine, _, run_id, clock = opened_timed(store)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
 
     decision = engine.counter(run_id, RECORDED_CEILING + 1)
 
@@ -312,9 +325,11 @@ def test_the_final_round_closes_above_the_ceiling(store):
 
 def test_a_fourth_round_is_refused(store):
     """The third round always concludes, so there is never a fourth."""
-    engine, _, run_id = opened(store)
+    engine, _, run_id, clock = opened_timed(store)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 3000)  # closes
 
     with pytest.raises(NegotiationAlreadyClosed):
@@ -403,9 +418,11 @@ def test_no_agent_facing_response_carries_the_ceiling(store):
 
 
 def test_the_close_decision_reports_the_last_offer_not_the_ceiling(store):
-    engine, _, run_id = opened(store)
+    engine, _, run_id, clock = opened_timed(store)
     engine.counter(run_id, 5000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 5000)
+    clock.advance(seconds=16)
 
     decision = engine.counter(run_id, 5000)
 
@@ -438,9 +455,11 @@ def test_the_opening_event_records_the_ceiling_for_a_rep(store, events):
 def test_a_closed_call_records_the_gap_for_a_rep(store, events):
     from app.events import EventType
 
-    engine, _, run_id = opened(store, events)
+    engine, _, run_id, clock = opened_timed(store, events)
     engine.counter(run_id, 5000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 5000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 5000)
 
     closed = events.of_type(EventType.NEGOTIATION_CLOSED)[-1]
@@ -451,10 +470,82 @@ def test_a_closed_call_records_the_gap_for_a_rep(store, events):
 def test_every_round_is_recorded_with_its_number(store, events):
     from app.events import EventType
 
-    engine, _, run_id = opened(store, events)
+    engine, _, run_id, clock = opened_timed(store, events)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
     engine.counter(run_id, 3000)
 
     rounds = events.of_type(EventType.NEGOTIATION_ROUND)
     assert [event.payload["round"] for event in rounds] == [1, 2]
+
+
+# --- counter replay (idempotency) ---------------------------------------
+
+
+def test_a_retry_of_the_same_ask_replays_the_round(store, events):
+    """A webhook retry of the same ask inside the window is not a new round."""
+    from app.events import EventType
+
+    engine, _, run_id, clock = opened_timed(store, events)
+
+    first = engine.counter(run_id, 3000)
+    clock.advance(seconds=2)
+    replay = engine.counter(run_id, 3000)
+
+    assert replay == first
+    assert replay.action is NegotiationAction.COUNTER
+    # The round counter did not advance, and no second round event was written.
+    assert store.require(run_id).negotiations[-1].round_number == 1
+    assert len(events.of_type(EventType.NEGOTIATION_ROUND)) == 1
+
+
+def test_a_retry_of_an_accept_replays_the_accept(store):
+    """A retry of the accept must not read as a fourth-round refusal."""
+    engine, offer, run_id, clock = opened_timed(store)
+
+    first = engine.counter(run_id, offer.offer)  # accept at the opening offer
+    clock.advance(seconds=2)
+    replay = engine.counter(run_id, offer.offer)
+
+    assert first.action is NegotiationAction.ACCEPT
+    assert replay == first
+
+
+def test_a_retry_of_a_close_replays_the_close(store):
+    engine, _, run_id, clock = opened_timed(store)
+
+    engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
+    engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
+    closed = engine.counter(run_id, 3000)  # closes on round 3
+    clock.advance(seconds=2)
+
+    replay = engine.counter(run_id, 3000)
+
+    assert closed.action is NegotiationAction.CLOSE
+    assert replay == closed
+
+
+def test_the_same_ask_after_the_window_is_a_new_round(store):
+    engine, _, run_id, clock = opened_timed(store)
+
+    first = engine.counter(run_id, 3000)
+    clock.advance(seconds=16)
+    second = engine.counter(run_id, 3000)
+
+    assert second.action is NegotiationAction.COUNTER
+    assert second.round_number == 2
+    assert second.amount != first.amount
+
+
+def test_a_different_ask_within_the_window_is_a_new_round(store):
+    engine, _, run_id, clock = opened_timed(store)
+
+    engine.counter(run_id, 3000)
+    clock.advance(seconds=1)
+    second = engine.counter(run_id, 3100)
+
+    assert second.round_number == 2

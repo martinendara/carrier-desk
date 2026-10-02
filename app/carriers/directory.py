@@ -47,6 +47,14 @@ _CONTACTS: dict[str, CarrierContact] = {
             legal_name="Halstead Carriers Ltd",
             email="m.halstead@gmail.com",
         ),
+        # Demo only: a real, FMCSA-eligible carrier (MC 107012) whose contact
+        # email is the operator's own inbox, so the OTP flow can be exercised
+        # end-to-end without a third-party address. Not production data.
+        CarrierContact(
+            mc_number="107012",
+            legal_name="NORTH AMERICAN VAN LINES INC",
+            email="martinendara@gmail.com",
+        ),
     )
 }
 

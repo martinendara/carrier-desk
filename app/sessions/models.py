@@ -120,6 +120,15 @@ class NegotiationSession(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
+    # --- counter replay (idempotency) ------------------------------------
+    #: The last counter this negotiation answered. A webhook retry of the same
+    #: ask inside a short window replays the same decision instead of burning a
+    #: round. All `repr=False`: none of this is agent-facing.
+    last_counter_ask: int | None = Field(default=None, repr=False)
+    last_counter_action: str | None = Field(default=None, repr=False)
+    last_counter_amount: int | None = Field(default=None, repr=False)
+    last_counter_at: datetime | None = Field(default=None, repr=False)
+
     @property
     def is_open(self) -> bool:
         return self.outcome is NegotiationOutcome.OPEN

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from fractions import Fraction
 from typing import Callable, Sequence
@@ -36,12 +36,19 @@ from app.sessions import (
     NegotiationLimitReached,
     NegotiationOutcome,
     NegotiationSession,
+    RunSession,
     RunSessionStore,
     utcnow,
 )
 from app.tms.models import LoadDetail
 
 logger = logging.getLogger(__name__)
+
+#: A counter retry that lands inside this window with the same ask is a replay
+#: of the answer that round already produced, not a new round. Long enough to
+#: cover a webhook retry, short enough that a genuine second counter cannot be
+#: mistaken for one.
+COUNTER_REPLAY_WINDOW = timedelta(seconds=15)
 
 
 class NegotiationAction(str, Enum):
@@ -185,11 +192,22 @@ class NegotiationEngine:
     # --- rounds ---------------------------------------------------------
 
     def counter(self, run_id: str, carrier_ask: int | str) -> Decision:
-        """Answer one carrier request. Every call here is exactly one round."""
-        session = self._store.require(run_id)
-        negotiation = self._active_or_raise(run_id, session.negotiations)
+        """Answer one carrier request. Every call here is exactly one round.
 
+        A retry of the same ask inside :data:`COUNTER_REPLAY_WINDOW` is a replay
+        of the answer that round already produced — it does not consume a round.
+        """
+        session = self._store.require(run_id)
         ask = _validate_ask(carrier_ask)
+
+        # Replay first, before the open/closed check: a retry of the round that
+        # just accepted or closed must return the same decision, not "already
+        # closed".
+        replay = self._replay(session, ask)
+        if replay is not None:
+            return replay
+
+        negotiation = self._active_or_raise(run_id, session.negotiations)
         negotiation.round_number += 1
         round_number = negotiation.round_number
         negotiation.updated_at = self._clock()
@@ -198,7 +216,9 @@ class NegotiationEngine:
         #    asking for less than we offered, and there is no reason to talk them
         #    up.
         if ask <= negotiation.current_offer:
-            return self._accept(session, negotiation, ask, round_number)
+            return self._remember(
+                negotiation, ask, self._accept(session, negotiation, ask, round_number)
+            )
 
         # 2. The concession rounds.
         if round_number < self._max_rounds:
@@ -214,7 +234,9 @@ class NegotiationEngine:
                 ceiling_margin=self._margin,
             )
             if ask <= step:
-                return self._accept(session, negotiation, ask, round_number)
+                return self._remember(
+                    negotiation, ask, self._accept(session, negotiation, ask, round_number)
+                )
 
             negotiation.current_offer = step
             self._sink.emit(
@@ -228,12 +250,18 @@ class NegotiationEngine:
                 offer=step,
                 ceiling=negotiation.ceiling,
             )
-            return Decision(action=NegotiationAction.COUNTER, amount=step, round_number=round_number)
+            return self._remember(
+                negotiation,
+                ask,
+                Decision(action=NegotiationAction.COUNTER, amount=step, round_number=round_number),
+            )
 
         # 3. The last round: anything up to the ceiling is a deal, and the
         #    ceiling itself is the line. Past it, the call ends here.
         if ask <= negotiation.ceiling:
-            return self._accept(session, negotiation, ask, round_number)
+            return self._remember(
+                negotiation, ask, self._accept(session, negotiation, ask, round_number)
+            )
 
         negotiation.outcome = NegotiationOutcome.CLOSED
         negotiation.gap = ask - negotiation.ceiling
@@ -253,11 +281,42 @@ class NegotiationEngine:
         # The amount is the last offer, never the ceiling: reporting `C` here
         # would hand the agent the number the whole design hides. The last offer
         # is at least one increment below `C` by construction.
-        return Decision(
-            action=NegotiationAction.CLOSE,
-            amount=negotiation.current_offer,
-            round_number=round_number,
+        return self._remember(
+            negotiation,
+            ask,
+            Decision(
+                action=NegotiationAction.CLOSE,
+                amount=negotiation.current_offer,
+                round_number=round_number,
+            ),
         )
+
+    def _replay(self, session: RunSession, ask: int) -> Decision | None:
+        """The earlier decision for `ask`, if it is recent enough to be a retry."""
+        if not session.negotiations:
+            return None
+        negotiation = session.negotiations[-1]
+        if negotiation.last_counter_ask != ask:
+            return None
+        if negotiation.last_counter_action is None or negotiation.last_counter_amount is None:
+            return None
+        if negotiation.last_counter_at is None:
+            return None
+        if self._clock() - negotiation.last_counter_at > COUNTER_REPLAY_WINDOW:
+            return None
+        return Decision(
+            action=NegotiationAction(negotiation.last_counter_action),
+            amount=negotiation.last_counter_amount,
+            round_number=negotiation.round_number,
+        )
+
+    def _remember(self, negotiation: NegotiationSession, ask: int, decision: Decision) -> Decision:
+        """Record the answer to `ask` so a retry can replay it."""
+        negotiation.last_counter_ask = ask
+        negotiation.last_counter_action = decision.action.value
+        negotiation.last_counter_amount = decision.amount
+        negotiation.last_counter_at = self._clock()
+        return decision
 
     def _accept(
         self,

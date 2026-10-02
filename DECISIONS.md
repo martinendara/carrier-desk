@@ -956,3 +956,26 @@ message cannot name the env var without a circular import (`container` imports `
 **Why.** The port handling was already correct; the failure mode was the crash-loop, and a
 crash-loop is indistinguishable from a hang. Naming `TMS_HOST` turns a confusing symptom
 into an answer in the log line.
+
+---
+
+## 50. A counter retry replays the round instead of consuming one
+
+**Problem.** The webhook layer may retry `counter_offer` after a lost response. Before
+this, every `counter()` call was a round — a retry of the same ask burned one of the three
+rounds, and a retry of an accept/close returned "already closed" instead of the decision
+the agent already had.
+
+**Choice.** The engine remembers the last counter (ask, action, amount, time) on the
+negotiation. A repeat of the same ask inside a 15 s window replays the stored decision —
+checked before the open/closed gate, so an accepted or closed round also replays — without
+advancing the round counter or emitting a round event.
+
+**Rejected.** *Key the replay only on the ask, forever.* A carrier who repeats their
+number a minute later is a genuine new round, not a retry. *Let the client send a round
+number.* That would hand the agent a value it can drop, replay or invent — the thing the
+`run_id` design exists to prevent.
+
+**Why.** A voice round trip takes longer than 15 s; a webhook retry is far shorter. The
+window is what tells the two apart, and it makes `counter_offer` safe to retry (retries =
+1 in `docs/platform-tools.md`).

@@ -608,10 +608,10 @@ def test_three_rounds_end_the_negotiation(api):
     client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
 
     actions = []
-    for _ in range(3):
+    for ask in (99999, 99998, 99997):
         body = client.post(
             "/negotiations/counter",
-            json={"run_id": "run-1", "carrier_ask": 99999},
+            json={"run_id": "run-1", "carrier_ask": ask},
             headers=HEADERS,
         ).json()
         actions.append(body["action"])
@@ -623,10 +623,10 @@ def test_a_fourth_round_is_refused(api):
     client, _ = api
     load_id = _negotiable_load(client)
     client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
-    for _ in range(3):
+    for ask in (99999, 99998, 99997):
         client.post(
             "/negotiations/counter",
-            json={"run_id": "run-1", "carrier_ask": 99999},
+            json={"run_id": "run-1", "carrier_ask": ask},
             headers=HEADERS,
         )
 
