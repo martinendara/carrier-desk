@@ -63,29 +63,45 @@ def event_id(event: Event) -> str:
 
 
 def build_row(event: Event) -> dict[str, Any]:
-    """Map one event to one Twin row. The full payload lives in ``details``."""
+    """Map one event to one Twin row.
+
+    Twin's `call_events` schema is all-text and rejects nulls, so numeric
+    columns are stringified, null columns are omitted, and the full payload is
+    JSON-encoded into `details` (which Twin stores as text).
+    """
     p = event.payload
     row: dict[str, Any] = {
         "id": event_id(event),
         "run_id": event.run_id,
         "event_type": event.type.value,
         "occurred_at": event.ts.isoformat(),
-        "mc_number": p.get("mc_number"),
-        "load_id": p.get("load_id"),
-        "offer": p.get("opening_offer", p.get("offer")),
-        "carrier_ask": p.get("carrier_ask"),
-        "round": p.get("round"),
-        "action": p.get("action", p.get("outcome", p.get("status"))),
-        "result_code": p.get("result_code"),
-        "agreed_rate": p.get("agreed_rate"),
-        "max_buy": p.get("ceiling", p.get("max_buy")),
-        "reason": p.get("reason"),
-        "details": p,
     }
-    if row["max_buy"] is not None and row["agreed_rate"] is not None:
-        row["margin"] = row["max_buy"] - row["agreed_rate"]
-    else:
-        row["margin"] = None
+
+    def put(payload_key: str, column: str | None = None) -> None:
+        column = column or payload_key
+        if payload_key in p and p[payload_key] is not None and column not in row:
+            value = p[payload_key]
+            row[column] = value if isinstance(value, str) else str(value)
+
+    put("mc_number")
+    put("load_id")
+    put("opening_offer", "offer")
+    put("offer", "offer")
+    put("carrier_ask")
+    put("round")
+    put("action", "action")
+    put("outcome", "action")
+    put("status", "action")
+    put("result_code")
+    put("agreed_rate")
+    put("ceiling", "max_buy")
+    put("max_buy", "max_buy")
+    put("reason")
+
+    if "max_buy" in row and "agreed_rate" in row:
+        row["margin"] = str(int(row["max_buy"]) - int(row["agreed_rate"]))
+
+    row["details"] = json.dumps(p, default=str)
     return row
 
 
@@ -198,13 +214,21 @@ class TwinWriter:
         return True
 
     def _log_failure(self, row: dict[str, Any], exc: Exception) -> None:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        body = ""
+        if response is not None:
+            try:
+                body = response.text[:500]
+            except Exception:
+                body = ""
         logger.warning(
-            "twin upload failed for %s after %d attempts: %s: %s (url=%s status=%s); JSONL has it",
+            "twin upload failed for %s after %d attempts: %s: %s (url=%s status=%s body=%r); JSONL has it",
             row["id"],
             self._max_attempts,
             type(exc).__name__,
             exc,
             self._url,
             status,
+            body,
         )

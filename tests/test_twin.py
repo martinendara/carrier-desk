@@ -44,9 +44,13 @@ def test_build_row_maps_negotiation_fields():
     assert row["run_id"] == "r"
     assert row["event_type"] == "negotiation_opened"
     assert row["load_id"] == "LD1"
-    assert row["max_buy"] == 2500
-    assert row["offer"] == 2000
-    assert row["details"] == {"load_id": "LD1", "ceiling": 2500, "opening_offer": 2000}
+    assert row["max_buy"] == "2500"  # Twin's schema is all-text
+    assert row["offer"] == "2000"
+    assert json.loads(row["details"]) == {
+        "load_id": "LD1",
+        "ceiling": 2500,
+        "opening_offer": 2000,
+    }
 
 
 def test_build_row_computes_the_protected_margin():
@@ -55,7 +59,31 @@ def test_build_row_computes_the_protected_margin():
         type=EventType.BOOKING_ATTEMPTED,
         payload={"agreed_rate": 2200, "ceiling": 2500},
     )
-    assert build_row(event)["margin"] == 300
+    assert build_row(event)["margin"] == "300"
+
+
+def test_build_row_omits_nulls_and_stringifies():
+    event = Event(
+        run_id="r",
+        type=EventType.NEGOTIATION_ROUND,
+        payload={
+            "load_id": "LD1",
+            "round": 2,
+            "action": "counter",
+            "carrier_ask": 2300,
+            "offer": 2225,
+            "ceiling": 2528,
+        },
+    )
+    row = build_row(event)
+    assert row["round"] == "2"
+    assert row["carrier_ask"] == "2300"
+    assert row["offer"] == "2225"
+    assert row["max_buy"] == "2528"
+    assert row["action"] == "counter"
+    assert all(value is not None for value in row.values())
+    assert isinstance(row["details"], str)
+    assert "reason" not in row  # null columns are omitted, not sent as null
 
 
 # --- the writer ----------------------------------------------------------
