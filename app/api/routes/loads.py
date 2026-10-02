@@ -15,11 +15,11 @@ from app.api import phrasing
 from app.api.deps import get_container, get_deadline, require_verified, session_for
 from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_search_loads
 from app.api.schemas import LoadDetailResponse, LoadSearchRequest, LoadSearchResponse
+from app.api.search_normalization import build_search_filters
 from app.container import Container
 from app.deadline import Deadline
 from app.events import EventType
 from app.results import ResultCode
-from app.tms.client import FILTER_FIELDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["loads"])
@@ -27,18 +27,6 @@ router = APIRouter(tags=["loads"])
 #: The brief caps a pitch at three loads. Fixing it here rather than exposing it
 #: means the agent cannot widen its own search.
 MAX_RESULTS = 3
-
-#: Request field -> TMS filter name. The TMS name is not always the obvious one.
-_FILTER_MAP = {
-    "orig_city": "ORIG_CITY",
-    "orig_state": "ORIG_STATE",
-    "orig_zip": "ORIG_ZIP",
-    "dest_city": "DEST_CITY",
-    "dest_state": "DEST_STATE",
-    "dest_zip": "DEST_ZIP",
-    "equipment": "EQTYPE",
-    "pickup_date": "PICKUP_DT",
-}
 
 
 @router.post("/loads/search", response_model=LoadSearchResponse)
@@ -53,17 +41,33 @@ def search_loads(
 
     session = require_verified(session_for(container, payload.run_id))
 
-    filters = {
-        _FILTER_MAP[field]: value
-        for field, value in payload.model_dump(exclude={"run_id"}).items()
-        if value not in (None, "") and field in _FILTER_MAP
-    }
+    filters = build_search_filters(
+        equipment=payload.equipment,
+        orig_city=payload.orig_city,
+        orig_state=payload.orig_state,
+        orig_zip=payload.orig_zip,
+        dest_city=payload.dest_city,
+        dest_state=payload.dest_state,
+        dest_zip=payload.dest_zip,
+        pickup_date=payload.pickup_date,
+    )
 
     summaries = container.tms.query_loads(max_results=MAX_RESULTS, deadline=deadline, **filters)
     # The pitch needs the full record, not the summary: fetch each load's detail
     # so search alone carries delivery_dt, weight, commodity, pieces, dims and
     # notes. rate and MAX_BUY are stripped by public_dict().
     loads = [container.tms.get_load(load.load_id, deadline=deadline) for load in summaries]
+
+    logger.warning(
+        "DIAG search equipment=%r origin=%r/%r destination=%r/%r filters=%r results=%d",
+        payload.equipment,
+        payload.orig_city,
+        payload.orig_state,
+        payload.dest_city,
+        payload.dest_state,
+        filters,
+        len(loads),
+    )
 
     # Recorded before the response is built: what the carrier was shown is what
     # this call may later negotiate, and it is decided here and nowhere else.
@@ -128,8 +132,3 @@ def _describe(load) -> str:
         f"That one picks up in {load.orig_city}, {load.orig_state} "
         f"and delivers to {load.dest_city}, {load.dest_state}."
     )
-
-
-# Keeps the filter names honest: if the TMS client stops accepting one, the
-# mapping above is wrong and this fails at import rather than at call time.
-assert set(_FILTER_MAP.values()) <= FILTER_FIELDS, "load filter map is out of date"

@@ -1437,3 +1437,33 @@ def test_a_search_with_equipment_and_origin_state_works(api):
     body = search(client, "run-1", equipment="DRY_VAN", orig_state="FL")
 
     assert body["count"] == 1
+
+
+def test_search_accepts_spoken_equipment_and_state(api):
+    """The agent transcribes speech: 'dry van' and 'florida' must still match."""
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="dry van", orig_state="florida")
+
+    assert body["count"] == 1
+    assert body["loads"][0]["orig_state"] == "FL"
+
+
+def test_search_splits_city_and_state_in_the_city_field(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="van", orig_city="Fort Lauderdale, Florida")
+
+    assert body["count"] == 1
+    assert body["loads"][0]["load_id"] == "LD00896"
+
+
+def test_search_treats_anywhere_as_no_destination(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="DRY_VAN", dest_city="anywhere")
+
+    assert body["count"] == 3
