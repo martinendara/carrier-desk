@@ -18,6 +18,8 @@ from typing import Any
 class HandoffReason(str, Enum):
     """Why a rep is being asked to take over."""
 
+    #: Booked, and confirmed.
+    BOOKED = "booked"
     #: Booked, but we could not confirm the reference ourselves.
     BOOKING_PENDING = "booking_pending"
     #: Round three ran out.

@@ -889,6 +889,17 @@ def test_an_unknown_reason_is_recorded_as_requested(api):
     assert container.handoffs.pending()[0].reason.value == "requested"
 
 
+def test_a_booked_reason_is_recognized(api):
+    """A confirmed booking hands off as `booked`, not as a person request."""
+    client, container = api
+
+    client.post(
+        "/handoff", json={"run_id": "run-1", "reason": "booked"}, headers=HEADERS
+    )
+
+    assert container.handoffs.pending()[0].reason.value == "booked"
+
+
 # --- errors -------------------------------------------------------------
 
 

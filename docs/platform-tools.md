@@ -333,8 +333,9 @@ tight.`
 | `run_id` | Fixed value (Run ID chip) | string | — | yes |
 | `reason` | Agent decides | string | `booking_pending` | no |
 
-`reason` is optional; any string is accepted and an unrecognised one is recorded
-as `requested`.
+`reason` is optional. Valid values: `booked`, `booking_pending`,
+`negotiation_failed`, `onboarding`, `fmcsa_rejected`, `requested`. An
+unrecognised one is recorded as `requested`.
 
 **Child node (Webhook).**
 
