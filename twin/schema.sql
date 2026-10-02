@@ -255,7 +255,7 @@ north AS (
 ),
 margins AS (
     SELECT sum(protected_margin_usd) AS total_margin_usd,
-           avg(protected_margin_usd) AS avg_margin_usd
+           round(avg(protected_margin_usd)) AS avg_margin_usd
     FROM calls
 ),
 identity AS (

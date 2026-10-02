@@ -131,9 +131,13 @@ Mechanics:
 - Report: `docs/qa-report.md` — PASS/FAIL per scenario + `v_kpi_overview` KPIs +
   the 3 rules at 0.
 
-## Next: the QA run
+## QA run — done (2026-10-02)
 
-1. Paste the current `twin/schema.sql` into Twin (the operator confirms first).
-2. Wake `/health`, then confirm the deploy is live (read `version` from `/health`).
-3. Run the QA script once against production with `qa-` run_ids, write
-   `docs/qa-report.md`, and paste it.
+`scripts/qa_run.py` ran once against production: **22/22 PASS**, recorded in
+`docs/qa-report.md` (which also carries the `v_kpi_overview` row).
+
+**Rate limit note.** `OTP_VERIFY_RATE_LIMIT_PER_HOUR` is **100 on the deploy right now**,
+temporary for the QA run (it reuses MC 15735 across ~18 verifies). It goes to **20
+permanent** the following day, because evaluators share MC 15735 — the operator flips it
+in Render. A re-run that reuses one reviewer MC needs the higher value; at 20 it would 429
+partway through.
