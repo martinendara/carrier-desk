@@ -138,6 +138,14 @@ WITH bounds AS (
     SELECT run_id, min(occurred_at) AS started_at, max(occurred_at) AS ended_at
     FROM call_events GROUP BY run_id
 ),
+-- A call is 'review' when any of its events carries the reviewer flag (the
+-- evaluation MC 15735). The flag lives on the otp_sent event only, so it is
+-- resolved here at the call level rather than per event.
+reviewer AS (
+    SELECT DISTINCT run_id
+    FROM call_events
+    WHERE (details->>'reviewer')::boolean IS TRUE
+),
 fmcsa AS (
     SELECT DISTINCT ON (run_id) run_id, mc_number,
            details->>'legal_name' AS carrier_name,
@@ -189,7 +197,13 @@ handed AS (
 )
 SELECT
     b.run_id,
-    CASE WHEN b.run_id LIKE 'qa-%' THEN 'qa' ELSE 'live' END AS source,
+    -- qa- prefix wins over the reviewer flag: a QA scenario that reuses the
+    -- reviewer MC is still a QA call, not an evaluator call.
+    CASE
+        WHEN b.run_id LIKE 'qa-%' THEN 'qa'
+        WHEN rv.run_id IS NOT NULL THEN 'review'
+        ELSE 'live'
+    END AS source,
     b.started_at,
     b.ended_at,
     f.mc_number,
@@ -218,6 +232,7 @@ SELECT
     extract(epoch FROM (op.opened_at - b.started_at))::int AS seconds_to_first_offer,
     bk.booking_status
 FROM bounds b
+LEFT JOIN reviewer rv USING (run_id)
 LEFT JOIN fmcsa f  USING (run_id)
 LEFT JOIN otp o    USING (run_id)
 LEFT JOIN opened op USING (run_id)

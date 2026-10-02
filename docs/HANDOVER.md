@@ -70,8 +70,10 @@ For a fresh session to resume without re-deriving anything. Read this, then
 
 - `call_events` (one row per event) + views `v_calls`, `v_kpi_overview`,
   `v_funnel`, `v_call_timeline`.
-- `v_calls` exposes `source` = `qa` if `run_id LIKE 'qa-%'` else `live`, and
-  `rounds_used` = count of `negotiation_round` with `action <> 'clarify'`.
+- `v_calls` exposes `source`: `qa` if `run_id LIKE 'qa-%'`, else `review` if any
+  event of the call carries `details.reviewer = true` (the evaluation MC 15735),
+  else `live`; and `rounds_used` = count of `negotiation_round` with
+  `action <> 'clarify'`.
 - Time metrics (`median_seconds_to_first_offer`) are computed **only** on
   `source = 'live'`; the other KPIs use everything.
 - `negotiation_opened.details` carries a load snapshot: `origin`, `destination`,
