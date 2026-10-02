@@ -9,7 +9,8 @@ in-process fake TMS instead of the live one.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import REPO_ROOT, Settings
@@ -98,6 +99,10 @@ class Container:
     fmcsa: FmcsaClient
     handoffs: HandoffQueue
     otp_verify_limiter: SlidingWindowLimiter
+    #: Serialises booking so two concurrent requests for the same run_id do not
+    #: both call LOAD_BOOK. Coarse (one lock for all calls) on purpose: the POC
+    #: is single-instance and low-traffic, and correctness beats throughput here.
+    booking_lock: threading.Lock = field(default_factory=threading.Lock)
     #: Set when TMS_MODE=fake. We own it and must stop it on the way out.
     fake_tms: FakeTms | None = None
 

@@ -805,6 +805,31 @@ def test_an_already_booked_load_is_pending(api):
     assert body["result_code"] == "booking_pending"
 
 
+def test_two_bookings_make_one_load_book(api):
+    """The platform cannot set zero retries; a retry must not double-book."""
+    client, container = api
+    _agree_a_rate(client)
+
+    first = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+    second = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert second == first
+    assert container.fake_tms.commands.count("LOAD_BOOK") == 1
+
+
+def test_a_retry_after_booking_pending_returns_the_same_response(api):
+    client, container = api
+    _agree_a_rate(client)
+    container.fake_tms.book_result = BOOK_ALREADY
+
+    first = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+    second = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert first["result_code"] == "booking_pending"
+    assert second == first
+    assert container.fake_tms.commands.count("LOAD_BOOK") == 1
+
+
 def test_booking_without_an_agreed_rate_is_refused(api):
     client, _ = api
     become_verified(client, "run-1")
@@ -1216,3 +1241,97 @@ def test_empty_secrets_are_still_fine_in_development():
     """The guards are production-only; development stays forgiving."""
     with api_app(env="development", service_api_key="dev-key", otp_hmac_secret=SECRET) as (client, _):
         assert client.get("/health").json()["status"] == "ok"
+
+
+# --- schema-sample -------------------------------------------------------
+
+
+_SCHEMA_SAMPLE_CALLS = [
+    ("/otp/send", {"run_id": "schema-sample"}, {"status", "masked_destination", "delivery", "result_code", "say"}),
+    ("/otp/verify", {"run_id": "schema-sample", "code": "000000"}, {"verified", "attempts_left", "result_code", "say"}),
+    ("/loads/search", {"run_id": "schema-sample"}, {"loads", "count", "result_code", "say"}),
+    ("/negotiations", {"run_id": "schema-sample", "load_id": "LD-SAMPLE"}, {"load_id", "offer", "say"}),
+    ("/negotiations/counter", {"run_id": "schema-sample", "carrier_ask": 1600}, {"action", "amount", "result_code", "say"}),
+    ("/bookings", {"run_id": "schema-sample"}, {"status", "booking_ref", "result_code", "say"}),
+    ("/handoff", {"run_id": "schema-sample"}, {"ticket_id", "say"}),
+]
+
+
+@pytest.mark.parametrize(("path", "body", "keys"), _SCHEMA_SAMPLE_CALLS)
+def test_schema_sample_returns_every_field(api, path, body, keys):
+    """The Generate button captures a full schema, not an error field."""
+    client, _ = api
+
+    response = client.post(path, json=body, headers=HEADERS)
+
+    assert response.status_code == 200
+    assert keys <= set(response.json())
+
+
+def test_schema_sample_send_otp_carries_the_delivery_fields(api):
+    client, _ = api
+
+    body = client.post("/otp/send", json={"run_id": "schema-sample"}, headers=HEADERS).json()
+
+    assert body["delivery"]["code"] == "000000"
+    assert body["delivery"]["destination"] == "sample@example.com"
+
+
+def test_schema_sample_search_returns_a_full_load(api):
+    client, _ = api
+
+    body = client.post("/loads/search", json={"run_id": "schema-sample"}, headers=HEADERS).json()
+
+    load = body["loads"][0]
+    assert load["load_id"] == "LD-SAMPLE"
+    for field in ("delivery_dt", "weight", "commodity", "pieces", "dims", "notes"):
+        assert field in load
+    assert "rate" not in load
+    assert "max_buy" not in load
+
+
+def test_schema_sample_touches_nothing(api):
+    """No session, no event, no TMS call — the handler never runs."""
+    client, container = api
+
+    for path, body, _ in _SCHEMA_SAMPLE_CALLS:
+        client.post(path, json=body, headers=HEADERS)
+
+    assert len(container.store) == 0
+    assert container.sink.events == []
+    assert container.fake_tms.requests == []
+
+
+def test_schema_sample_still_requires_the_api_key(api):
+    client, _ = api
+
+    response = client.post("/otp/send", json={"run_id": "schema-sample"})
+
+    assert response.status_code == 401
+
+
+# --- search returns full detail -----------------------------------------
+
+
+def test_search_returns_the_full_detail_for_each_load(api):
+    """The pitch no longer needs a separate get_load round trip."""
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="DRY_VAN")
+
+    load = body["loads"][0]
+    for field in ("delivery_dt", "weight", "commodity", "pieces", "dims", "notes"):
+        assert field in load
+    assert "rate" not in load
+    assert "max_buy" not in load
+
+
+def test_a_search_with_equipment_and_origin_state_works(api):
+    """The platform sends no zip or pickup date; two filters are enough."""
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="DRY_VAN", orig_state="FL")
+
+    assert body["count"] == 1

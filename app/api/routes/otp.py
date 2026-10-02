@@ -25,6 +25,7 @@ from app.api.schemas import (
     OtpVerifyRequest,
     OtpVerifyResponse,
 )
+from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_send_otp, sample_verify_otp
 from app.container import Container
 from app.otp import DispatchStatus, OtpFailure
 from app.results import ResultCode
@@ -60,6 +61,9 @@ def send_otp(
     it. Without a prior verification there is nothing to send to, and it is
     refused rather than sent to whatever MC the agent names.
     """
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_send_otp()
+
     session = session_for(container, payload.run_id)
     if session.mc_number is None:
         return OtpSendResponse(
@@ -98,6 +102,9 @@ def verify_otp(
     without this, opening a new call buys three more, and six digits is small
     enough that a patient caller would eventually find them.
     """
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_verify_otp()
+
     session = container.store.get(payload.run_id)
     key = _rate_limit_key(session, payload.run_id)
     decision = container.otp_verify_limiter.hit(key)

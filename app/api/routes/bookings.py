@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 
 from app.api import phrasing
 from app.api.deps import get_container, get_deadline, require_verified, session_for
+from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_book_load, sample_handoff
 from app.api.schemas import (
     BookingRequest,
     BookingResponse,
@@ -38,57 +39,55 @@ def create_booking(
     `booking_pending` and never `booked` — the client already refuses to guess,
     and this is where that promise is kept in the response the platform sees.
     """
-    session = require_verified(session_for(container, payload.run_id))
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_book_load()
 
-    negotiation = session.agreed_negotiation
-    if negotiation is None or negotiation.agreed_rate is None:
-        # Nothing to book. Not an error the carrier caused, so it is phrased as
-        # a next step rather than a failure.
-        from app.api.errors import ApiError
+    # Serialised so two concurrent requests for the same run_id never both
+    # book: the second waits here, then returns the first one's stored answer.
+    with container.booking_lock:
+        session = require_verified(session_for(container, payload.run_id))
 
-        raise ApiError(409, "no_agreed_rate", phrasing.NO_NEGOTIATION)
+        if session.booking_status is not None:
+            return _booking_response(session.booking_status, session.booking_ref)
 
-    mc_number = session.mc_number
-    container.sink.emit(
-        payload.run_id,
-        EventType.BOOKING_ATTEMPTED,
-        load_id=negotiation.load_id,
-        mc_number=mc_number,
-        agreed_rate=negotiation.agreed_rate,
-        ceiling=negotiation.ceiling,
-    )
+        negotiation = session.agreed_negotiation
+        if negotiation is None or negotiation.agreed_rate is None:
+            # Nothing to book. Not an error the carrier caused, so it is phrased
+            # as a next step rather than a failure.
+            from app.api.errors import ApiError
 
-    result = container.tms.book_load(
-        negotiation.load_id, mc_number, negotiation.agreed_rate, deadline=deadline
-    )
+            raise ApiError(409, "no_agreed_rate", phrasing.NO_NEGOTIATION)
 
-    container.sink.emit(
-        payload.run_id,
-        EventType.BOOKING_RESULT,
-        load_id=result.load_id,
-        status=result.status.value,
-        booking_ref=result.booking_ref,
-        ambiguous=result.ambiguous,
-    )
-
-    confirmed = result.status is BookingStatus.BOOKED and result.booking_ref is not None
-    if confirmed:
-        return BookingResponse(
-            status=result.status.value,
-            booking_ref=result.booking_ref,
-            result_code=ResultCode.BOOKED.value,
-            say=phrasing.BOOKED,
+        mc_number = session.mc_number
+        container.sink.emit(
+            payload.run_id,
+            EventType.BOOKING_ATTEMPTED,
+            load_id=negotiation.load_id,
+            mc_number=mc_number,
+            agreed_rate=negotiation.agreed_rate,
+            ceiling=negotiation.ceiling,
         )
 
-    # Ambiguous, or a success without a reference. Either way a human confirms
-    # it: "booked" is a promise this service only makes when it saw the
-    # reference come back.
-    return BookingResponse(
-        status=BookingStatus.BOOKED_UNCONFIRMED.value,
-        booking_ref=result.booking_ref,
-        result_code=ResultCode.BOOKING_PENDING.value,
-        say=phrasing.BOOKING_PENDING,
-    )
+        result = container.tms.book_load(
+            negotiation.load_id, mc_number, negotiation.agreed_rate, deadline=deadline
+        )
+
+        confirmed = result.status is BookingStatus.BOOKED and result.booking_ref is not None
+        session.booking_status = (
+            result.status.value if confirmed else BookingStatus.BOOKED_UNCONFIRMED.value
+        )
+        session.booking_ref = result.booking_ref
+
+        container.sink.emit(
+            payload.run_id,
+            EventType.BOOKING_RESULT,
+            load_id=result.load_id,
+            status=result.status.value,
+            booking_ref=result.booking_ref,
+            ambiguous=result.ambiguous,
+        )
+
+        return _booking_response(session.booking_status, session.booking_ref)
 
 
 @router.post("/handoff", response_model=HandoffResponse)
@@ -102,6 +101,9 @@ def create_handoff(
     carrier with no contact on file has no way to become verified. Gating it
     would turn "route this to a human" into a dead end.
     """
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_handoff()
+
     session = session_for(container, payload.run_id)
 
     reason = _parse_reason(payload.reason)
@@ -134,6 +136,23 @@ def create_handoff(
     )
 
     return HandoffResponse(ticket_id=ticket.ticket_id, say=phrasing.HANDOFF)
+
+
+def _booking_response(status: str, booking_ref: str | None) -> BookingResponse:
+    """The response for a booking outcome, reconstructed for a retry."""
+    if status == BookingStatus.BOOKED.value:
+        return BookingResponse(
+            status=status,
+            booking_ref=booking_ref,
+            result_code=ResultCode.BOOKED.value,
+            say=phrasing.BOOKED,
+        )
+    return BookingResponse(
+        status=BookingStatus.BOOKED_UNCONFIRMED.value,
+        booking_ref=booking_ref,
+        result_code=ResultCode.BOOKING_PENDING.value,
+        say=phrasing.BOOKING_PENDING,
+    )
 
 
 def _parse_reason(raw: str | None) -> HandoffReason:

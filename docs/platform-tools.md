@@ -156,6 +156,10 @@ take the caller's details and end the call — do not hand off.
 
 At least one filter is required. Only the fields the carrier gave go in the body.
 
+`equipment` values are short upper-case identifiers. `DRY_VAN` is the one
+confirmed in the recorded data; `REEFER` / `FLATBED` are candidates, not
+confirmed. An unknown value returns no matches (no error).
+
 **Child node (Webhook).**
 
 - Method: `POST`
@@ -180,7 +184,9 @@ At least one filter is required. Only the fields the carrier gave go in the body
 
 Load object fields (agent-visible): `load_id`, `orig_city`, `orig_state`,
 `orig_zip`, `dest_city`, `dest_state`, `dest_zip`, `pickup_dt`, `eqtype`,
-`miles`, `status`. No `rate` — the price comes only from `open_negotiation`.
+`miles`, `status`, plus the full detail — `delivery_dt`, `weight`, `commodity`,
+`pieces`, `dims`, `notes`. No `rate`, no `max_buy`: the price comes only from
+`open_negotiation`.
 
 **Retries / blocking / end call.** Retries: 1 (idempotent read). Blocking: yes.
 End call: no.
@@ -189,44 +195,7 @@ End call: no.
 
 ---
 
-## 4. `get_load` — GET `/loads/{load_id}`
-
-**Description (agent).** Get the full detail for one load so you can pitch it
-(rate, dates, commodity, notes). Call for a load that came back from
-`search_loads`. Do not call for a load that was not shown this call.
-
-**Parameters.**
-
-| name | source | type | example | required |
-|---|---|---|---|---|
-| `run_id` | Fixed value (Run ID chip) | string | — | yes |
-| `load_id` | Agent decides | string | `LD00859` | yes |
-
-**Child node (Webhook).**
-
-- Method: `GET`
-- URL: `{{SERVICE_BASE_URL}}/loads/{{$var:<tool>.load_id}}`
-- Params (query string): `run_id` = `{{$var:<tool>.run_id}}`
-- Body: none
-
-**Response fields.**
-
-| field | audience | note |
-|---|---|---|
-| `load` | Agent | full load object; **`MAX_BUY` is stripped server-side** |
-| `say` | Agent | speak this |
-
-`load` adds `delivery_dt`, `weight`, `commodity`, `pieces`, `dims`, `notes` to
-the search fields. No `max_buy`, ever.
-
-**Retries / blocking / end call.** Retries: 1 (idempotent read). Blocking: yes.
-End call: no.
-
-**Additional node.** None.
-
----
-
-## 5. `open_negotiation` — POST `/negotiations`
+## 4. `open_negotiation` — POST `/negotiations`
 
 **Description (agent).** Open a negotiation on a load shown this call and get the
 opening offer. Call when the carrier wants to talk price. Do not call for a load
@@ -266,7 +235,7 @@ same offer). Blocking: yes. End call: no.
 
 ---
 
-## 6. `counter_offer` — POST `/negotiations/counter`
+## 5. `counter_offer` — POST `/negotiations/counter`
 
 **Description (agent).** Send the carrier's counter-offer (a dollar amount) and
 get `accept` / `counter` / `close`. Call once per carrier counter, after
@@ -313,7 +282,7 @@ call directly — no handoff).
 
 ---
 
-## 7. `book_load` — POST `/bookings`
+## 6. `book_load` — POST `/bookings`
 
 **Description (agent).** Book the load at the rate the carrier accepted. Call
 only after `counter_offer` returned `accept`. Do not call before an accepted
@@ -346,16 +315,16 @@ agent supplies.
 | `result_code` | Agent (routing) | `booked` \| `booking_pending` |
 | `say` | Agent | speak this |
 
-**Retries / blocking / end call.** Retries: **0** — booking is not idempotent:
-each successful `LOAD_BOOK` permanently consumes the load, so a blind retry
-could double-book. Blocking: yes. End call: no — `handoff` still follows; on
+**Retries / blocking / end call.** Retries: 1 — safe now: the server stores the
+booking per `run_id`, so a retry returns the same answer instead of a second
+`LOAD_BOOK`. Blocking: yes. End call: no — `handoff` still follows; on
 `booking_pending` the agent says a rep confirms, then hands off.
 
 **Additional node.** None.
 
 ---
 
-## 8. `handoff` — POST `/handoff`
+## 7. `handoff` — POST `/handoff`
 
 **Description (agent).** Hand the call to a senior rep. Call only to close out a
 booked or pending booking, to route a carrier with no contact on file, or when
@@ -405,12 +374,20 @@ soon as the tool returns; the caller only hears the `Message` above.
 ## Call order
 
 `verify_carrier` (already built) → `send_otp` → `verify_otp` → `search_loads` →
-`get_load` → `open_negotiation` → `counter_offer` → `book_load` → `handoff`.
+`open_negotiation` → `counter_offer` → `book_load` → `handoff`.
 
 Gating recap: `verify_carrier`, `send_otp`, `verify_otp` and `handoff` run
-without a verified OTP (handoff is the escape hatch). `search_loads`, `get_load`,
+without a verified OTP (handoff is the escape hatch). `search_loads`,
 `open_negotiation`, `counter_offer` and `book_load` all require the OTP to be
 verified for the same `run_id`.
+
+## Schema capture (`run_id = "schema-sample"`)
+
+The HappyRobot **Generate** button fires a real request to capture a tool's
+response shape, and there is no session for it. When `run_id` is exactly
+`schema-sample`, every tool returns a 200 with a full sample response (dummy
+values, e.g. `LD-SAMPLE`, code `000000`, `sample@example.com`) instead of
+touching state. `X-API-Key` is still required.
 
 ## End call — only `handoff`
 

@@ -159,6 +159,13 @@ class RunSession(BaseModel):
 
     negotiations: list[NegotiationSession] = Field(default_factory=list)
 
+    #: The booking outcome for this call, stored once made. A retry (the
+    #: platform cannot set zero retries) returns the same answer instead of a
+    #: second LOAD_BOOK. `booking_status` is the response status ("booked" or
+    #: "booked_unconfirmed"); None until the first booking completes.
+    booking_status: str | None = None
+    booking_ref: str | None = None
+
     # --- shown loads ----------------------------------------------------
 
     def record_shown_load(self, load_id: str) -> None:

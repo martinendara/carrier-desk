@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api import phrasing
 from app.api.deps import get_container, get_deadline, require_verified, session_for
+from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_search_loads
 from app.api.schemas import LoadDetailResponse, LoadSearchRequest, LoadSearchResponse
 from app.container import Container
 from app.deadline import Deadline
@@ -46,7 +47,10 @@ def search_loads(
     container: Container = Depends(get_container),
     deadline: Deadline = Depends(get_deadline),
 ) -> LoadSearchResponse:
-    """Find up to three loads, and remember them as shown for this call."""
+    """Find up to three loads (full detail), and remember them as shown."""
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_search_loads()
+
     session = require_verified(session_for(container, payload.run_id))
 
     filters = {
@@ -55,7 +59,11 @@ def search_loads(
         if value not in (None, "") and field in _FILTER_MAP
     }
 
-    loads = container.tms.query_loads(max_results=MAX_RESULTS, deadline=deadline, **filters)
+    summaries = container.tms.query_loads(max_results=MAX_RESULTS, deadline=deadline, **filters)
+    # The pitch needs the full record, not the summary: fetch each load's detail
+    # so search alone carries delivery_dt, weight, commodity, pieces, dims and
+    # notes. rate and MAX_BUY are stripped by public_dict().
+    loads = [container.tms.get_load(load.load_id, deadline=deadline) for load in summaries]
 
     # Recorded before the response is built: what the carrier was shown is what
     # this call may later negotiate, and it is decided here and nowhere else.

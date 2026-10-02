@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends
 
 from app.api import phrasing
 from app.api.deps import get_container, get_deadline, require_verified, session_for
+from app.api.schema_sample import (
+    SCHEMA_SAMPLE_RUN_ID,
+    sample_counter_offer,
+    sample_open_negotiation,
+)
 from app.api.schemas import (
     NegotiationCounterRequest,
     NegotiationCounterResponse,
@@ -43,6 +48,9 @@ def open_negotiation(
     process. The engine reads the ceiling off the fetched record; the caller
     never supplies a number.
     """
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_open_negotiation()
+
     require_verified(session_for(container, payload.run_id))
 
     load = container.tms.get_load(payload.load_id, deadline=deadline)
@@ -65,6 +73,9 @@ def counter_offer(
     The response is `{action, amount}` and nothing else. No ceiling, no gap, no
     step — those are what the whole design exists to keep on this side.
     """
+    if payload.run_id == SCHEMA_SAMPLE_RUN_ID:
+        return sample_counter_offer()
+
     require_verified(session_for(container, payload.run_id))
 
     decision = container.negotiation.counter(payload.run_id, payload.carrier_ask)

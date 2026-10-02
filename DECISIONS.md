@@ -1050,3 +1050,57 @@ they stay `null`; a code for them would fabricate an outcome that has not happen
 
 **Why.** One column of result codes is what lets Twin aggregate how calls end without
 reading per-tool action strings.
+
+---
+
+## 55. A `schema-sample` run id returns canned shapes without side effects
+
+**Problem.** The HappyRobot "Generate" button fires a real request to capture a tool's
+response shape, but there is no session for it, so a normal handler writes an `error` field
+and the platform captures an empty schema.
+
+**Choice.** When `run_id` is exactly `"schema-sample"`, each tool returns a 200 with a
+canned response carrying every field of its real response (obvious dummy values). The check
+sits at the top of each handler, before any session/TMS/FMCSA/event work; auth still runs
+first because it is a router-level dependency.
+
+**Rejected.** *A dedicated schema endpoint.* It would drift from the real responses. *Return
+the sample without auth.* The API key gate must hold for every request, sample or not.
+
+**Why.** The schema is captured from the same endpoint the agent calls, so it cannot go
+stale.
+
+---
+
+## 56. Search returns the full load detail
+
+**Problem.** The pitch needed `get_load` after `search_loads` to get `delivery_dt`, `weight`,
+`commodity`, `pieces`, `dims` and `notes` — an extra round trip the voice flow does not need.
+
+**Choice.** `search_loads` fetches each matched load's full detail (LOAD_GET per result, up
+to 3) and returns `LoadDetail.public_dict()`, so one tool carries everything the agent needs
+to pitch. `get_load` is dropped from the platform.
+
+**Rejected.** *Keep the summary and add fields to LOAD_QUERY.* The TMS only discloses the
+detail columns on LOAD_GET.
+
+**Why.** Fewer tools, one fewer round trip, and the rate/ceiling stay hidden because
+`public_dict()` already strips both.
+
+---
+
+## 57. POST /bookings is idempotent per run_id
+
+**Problem.** The platform's POST node does not allow zero retries, so a retried booking
+would call `LOAD_BOOK` twice and permanently consume a second load.
+
+**Choice.** The booking outcome (status + ref) is stored on the session, and a single
+`booking_lock` serialises the whole check-and-book. A retry — after completion or while the
+first is still in flight — returns the stored answer and never issues a second `LOAD_BOOK`.
+
+**Rejected.** *Let the platform "just not retry".* It cannot; the minimum is one retry.
+*Make the TMS call itself idempotent.* The TMS is not ours, and `ALREADY_BOOKED` is not the
+same as "the same successful answer".
+
+**Why.** One `LOAD_BOOK` per agreed rate, per call — the rate is stored server-side and so
+is the outcome.
