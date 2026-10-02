@@ -74,6 +74,11 @@ the failure looks like a broken integration rather than a sleeping host. **So: R
 sleep, continuous billing), not Render free.** The usual workaround for Render — a cron
 pinging every 14 minutes — is not something to build a phone system on.
 
+**Known limitation, as currently deployed.** The live POC runs on Render's free tier with
+no external keep-alive. Before each test call, wake the service manually by hitting
+`GET /health` once (the cold start is paid on that probe, not on the carrier's first tool
+call). This is a QA-workflow limitation, not a product behaviour.
+
 Sources: [Railway pricing](https://railway.com/pricing.md),
 [Railway vs Render free tier comparison](https://agentdeals.dev/railway-vs-render),
 [what the free tiers actually do](https://dev.to/jarynagent/i-deployed-the-same-api-to-railway-render-and-flyio-free-tiers-one-sleeps-one-throttles-one-3f33),
