@@ -933,3 +933,26 @@ currently a constant, and that is visible in `PROGRESS.md` as the last open `TOD
 rather than hidden behind a plausible-looking number.
 
 ---
+
+---
+
+## 49. A missing TMS address fails at startup, and names the variable
+
+**Problem.** A deploy whose environment is missing `TMS_HOST` (or `TMS_PORT`/`TMS_TOKEN`)
+crashed on the first `TmsClient` build with a bare `ValueError: "TMS host is required"`.
+Render saw a container that never became healthy and reported "timed out waiting for a
+health check" — a hung service, not the misconfiguration it is.
+
+**Choice.** Validate the live-TMS connectivity in `Container.build`, before the client is
+constructed, and raise the same `ConfigurationError` the production guard uses — naming the
+variable and the fix. It is checked always, not gated on `ENV=production`, because live
+mode needs the address in every environment.
+
+**Rejected.** *Add it to `_enforce_production_guards` only.* The bare `docker run -e
+PORT=10000` reproduction runs as development (no `ENV`), so a production-only check would
+still crash with the unnamed `ValueError`. *Let the client keep raising `ValueError`.* The
+message cannot name the env var without a circular import (`container` imports `TmsClient`).
+
+**Why.** The port handling was already correct; the failure mode was the crash-loop, and a
+crash-loop is indistinguishable from a hang. Naming `TMS_HOST` turns a confusing symptom
+into an answer in the log line.

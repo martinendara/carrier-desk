@@ -124,6 +124,31 @@ class Container:
                 total_budget=settings.request_budget_seconds,
             )
         else:
+            # The live client refuses an empty host/port/token with a bare
+            # ``ValueError`` that does not name the environment variable. A
+            # deploy missing TMS_* then crash-loops at startup, which Render
+            # reports as "timed out waiting for a health check" — a hung
+            # service, not the misconfiguration it is. Raise the same
+            # ConfigurationError the production guard uses, naming the variable,
+            # so the log points at exactly what is missing. Checked always, not
+            # just in production: live mode needs these in every environment.
+            if not settings.tms_host:
+                raise ConfigurationError(
+                    "TMS_HOST is empty and TMS_MODE is not 'fake'. The service "
+                    "cannot reach the legacy TMS. Set TMS_HOST, TMS_PORT and "
+                    "TMS_TOKEN, or TMS_MODE=fake."
+                )
+            if not settings.tms_port:
+                raise ConfigurationError(
+                    "TMS_PORT is empty and TMS_MODE is not 'fake'. The service "
+                    "cannot reach the legacy TMS. Set TMS_PORT, or TMS_MODE=fake."
+                )
+            if not settings.tms_token_value:
+                raise ConfigurationError(
+                    "TMS_TOKEN is empty and TMS_MODE is not 'fake'. The service "
+                    "cannot authenticate to the legacy TMS. Set TMS_TOKEN, or "
+                    "TMS_MODE=fake."
+                )
             tms = TmsClient.from_settings(settings)
 
         return cls(

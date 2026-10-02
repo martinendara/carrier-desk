@@ -996,6 +996,79 @@ def test_live_tms_is_fine_in_production():
         app.state.container.close()
 
 
+def test_live_tms_without_host_is_refused_in_production():
+    """A missing TMS_HOST must name the variable, not crash as a bare ValueError
+    that reads like a hung service."""
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="production",
+                tms_mode="live",
+                tms_host="",
+                tms_port=1234,
+                tms_token="not-a-real-token",
+                service_api_key=API_KEY,
+                otp_hmac_secret=SECRET,
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "TMS_HOST" in str(caught.value)
+
+
+def test_live_tms_without_host_is_refused_in_development_too():
+    """The failing deploy is a bare container (`docker run -e PORT=10000`), which
+    runs as development (no ENV set). Live mode needs the TMS address in every
+    environment, so this check is not gated on production."""
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(
+            Settings(
+                env="development",
+                tms_mode="live",
+                tms_host="",
+                tms_port=1234,
+                tms_token="not-a-real-token",
+                service_api_key=API_KEY,
+                otp_hmac_secret=SECRET,
+                events_jsonl_path="memory",
+            )
+        )
+
+    assert "TMS_HOST" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("missing", "blank"),
+    [
+        ("tms_port", 0),
+        ("tms_token", ""),
+    ],
+)
+def test_live_tms_connectivity_is_named(missing, blank):
+    from app.container import ConfigurationError
+
+    options = {
+        "env": "development",
+        "tms_mode": "live",
+        "tms_host": "tms.example.test",
+        "tms_port": 1234,
+        "tms_token": "not-a-real-token",
+        "service_api_key": API_KEY,
+        "otp_hmac_secret": SECRET,
+        "events_jsonl_path": "memory",
+    }
+    options[missing] = blank
+
+    with pytest.raises(ConfigurationError) as caught:
+        create_app(Settings(**options))
+
+    assert missing.upper() in str(caught.value)
+
+
 def test_an_empty_api_key_is_refused_in_production():
     """Left to fail at request time it is a 503 that looks like an outage."""
     from app.container import ConfigurationError
