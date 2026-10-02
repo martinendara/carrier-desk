@@ -119,7 +119,8 @@ class Settings(BaseSettings):
     #: Twin tables exist; turn it on once the schema is in place.
     twin_enabled: bool = False
     twin_base_url: str = "https://platform.happyrobot.ai/api/v2"
-    twin_api_key: SecretStr = SecretStr("")
+    #: The HappyRobot organisation key, shared with the platform API.
+    hr_platform_api_key: SecretStr = SecretStr("")
     twin_table: str = "call_events"
     twin_timeout_seconds: float = 3.0
     twin_max_attempts: int = 3

@@ -49,7 +49,7 @@ def _save_checkpoint(n: int) -> None:
 def _upload(settings, rows: list[dict]) -> None:
     url = f"{settings.twin_base_url.rstrip('/')}/twin/tables/{settings.twin_table}/rows/bulk"
     headers = {
-        "Authorization": f"Bearer {settings.twin_api_key.get_secret_value()}",
+        "Authorization": f"Bearer {settings.hr_platform_api_key.get_secret_value()}",
         "Content-Type": "application/json",
     }
     with httpx.Client(timeout=settings.twin_timeout_seconds) as client:

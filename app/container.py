@@ -123,7 +123,7 @@ class Container:
             sink = TwinWriter(
                 sink,
                 base_url=settings.twin_base_url,
-                api_key=settings.twin_api_key.get_secret_value(),
+                api_key=settings.hr_platform_api_key.get_secret_value(),
                 table=settings.twin_table,
                 enabled=True,
                 timeout=settings.twin_timeout_seconds,
