@@ -288,6 +288,20 @@ class NegotiationEngine:
         negotiation.outcome = NegotiationOutcome.CLOSED
         negotiation.gap = ask - negotiation.ceiling
         negotiation.updated_at = self._clock()
+
+        # Every carrier request is a round, including the one that runs out.
+        self._sink.emit(
+            session.run_id,
+            EventType.NEGOTIATION_ROUND,
+            negotiation_id=negotiation.negotiation_id,
+            load_id=negotiation.load_id,
+            round=round_number,
+            action=NegotiationAction.CLOSE.value,
+            carrier_ask=ask,
+            offer=negotiation.current_offer,
+            ceiling=negotiation.ceiling,
+        )
+
         self._sink.emit(
             session.run_id,
             EventType.NEGOTIATION_CLOSED,
@@ -371,6 +385,20 @@ class NegotiationEngine:
         negotiation.agreed_rate = rate
         negotiation.current_offer = rate
         negotiation.updated_at = self._clock()
+
+        # Every carrier request is a round, even when it is accepted on the
+        # spot, so the timeline shows "Round N: carrier asked $X · accepted".
+        self._sink.emit(
+            session.run_id,
+            EventType.NEGOTIATION_ROUND,
+            negotiation_id=negotiation.negotiation_id,
+            load_id=negotiation.load_id,
+            round=round_number,
+            action=NegotiationAction.ACCEPT.value,
+            carrier_ask=rate,
+            offer=rate,
+            ceiling=negotiation.ceiling,
+        )
 
         self._sink.emit(
             session.run_id,

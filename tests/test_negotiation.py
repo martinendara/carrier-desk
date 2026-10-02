@@ -478,7 +478,7 @@ def test_every_round_is_recorded_with_its_number(store, events):
     engine.counter(run_id, 3000)
 
     rounds = events.of_type(EventType.NEGOTIATION_ROUND)
-    assert [event.payload["round"] for event in rounds] == [1, 2]
+    assert [event.payload["round"] for event in rounds] == [1, 2, 3]
 
 
 # --- counter replay (idempotency) ---------------------------------------

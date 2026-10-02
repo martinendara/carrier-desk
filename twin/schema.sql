@@ -50,27 +50,40 @@ SELECT
                  ELSE ' rejected (' || COALESCE(details->>'reason', '') || ')'
             END
         WHEN 'otp_sent' THEN
-            'OTP sent to ' || COALESCE(details->>'destination', '') ||
-            CASE WHEN (details->>'resend')::boolean THEN ' (resend)' ELSE '' END
+            CASE WHEN (details->>'reviewer')::boolean THEN
+                'Reviewer test code (no message sent)'
+            ELSE
+                'OTP sent to ' || COALESCE(details->>'destination', '') ||
+                CASE WHEN (details->>'resend')::boolean THEN ' (resend)' ELSE '' END
+            END
         WHEN 'otp_verified' THEN 'OTP verified'
         WHEN 'otp_failed' THEN
             'OTP failed (' || COALESCE(details->>'reason', '') || ', ' ||
             COALESCE((details->>'attempts_left')::text, '') || ' left)'
         WHEN 'search_performed' THEN
-            'Search: ' || COALESCE((details->>'results')::text, '0') || ' result(s)'
+            CASE WHEN COALESCE((details->>'results')::int, 0) = 1
+                 THEN 'Search: 1 result'
+                 ELSE 'Search: ' || COALESCE((details->>'results')::int, 0)::text || ' results'
+            END
         WHEN 'load_pitched' THEN 'Pitched ' || COALESCE(load_id, 'a load')
         WHEN 'negotiation_opened' THEN
             'Offer $' || to_char((details->>'opening_offer')::numeric, 'FM999,999,999')
         WHEN 'negotiation_round' THEN
-            'Round ' || COALESCE(details->>'round', '') || ': ' ||
             CASE details->>'action'
                 WHEN 'clarify' THEN
                     'asked to confirm the number' ||
                     CASE WHEN details->>'carrier_ask' IS NOT NULL
                          THEN ' (heard $' || to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') || ')'
                          ELSE '' END
+                WHEN 'accept' THEN
+                    'Round ' || COALESCE(details->>'round', '') || ': carrier asked $' ||
+                    to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') || ' · accepted'
+                WHEN 'close' THEN
+                    'Round ' || COALESCE(details->>'round', '') || ': carrier asked $' ||
+                    to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') || ' · no deal'
                 ELSE
-                    'carrier asked $' || to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') ||
+                    'Round ' || COALESCE(details->>'round', '') || ': carrier asked $' ||
+                    to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') ||
                     ' · system countered $' || to_char((details->>'offer')::numeric, 'FM999,999,999')
             END
         WHEN 'negotiation_closed' THEN
@@ -156,7 +169,7 @@ closed AS (
 rounds AS (
     SELECT run_id, count(*) AS rounds_used
     FROM call_events
-    WHERE event_type = 'negotiation_round' AND details->>'action' = 'counter'
+    WHERE event_type = 'negotiation_round' AND details->>'action' <> 'clarify'
     GROUP BY run_id
 ),
 booked AS (

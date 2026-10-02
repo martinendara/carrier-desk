@@ -1027,6 +1027,7 @@ def test_a_full_call_is_recorded_in_the_event_log(api):
         EventType.OTP_VERIFIED,
         EventType.SEARCH_PERFORMED,
         EventType.NEGOTIATION_OPENED,
+        EventType.NEGOTIATION_ROUND,
         EventType.NEGOTIATION_CLOSED,
         EventType.BOOKING_ATTEMPTED,
         EventType.BOOKING_RESULT,
