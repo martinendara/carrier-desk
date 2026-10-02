@@ -19,9 +19,8 @@ import httpx
 
 from app.config import get_settings
 from app.events.models import Event
-from app.twin import build_row
+from app.twin import _clean_key, _is_duplicate, build_row
 
-BATCH = 500
 CHECKPOINT = "var/twin_backfill_checkpoint"
 
 
@@ -46,16 +45,18 @@ def _save_checkpoint(n: int) -> None:
     Path(CHECKPOINT).write_text(str(n), encoding="utf-8")
 
 
-def _upload(settings, rows: list[dict]) -> None:
-    url = f"{settings.twin_base_url.rstrip('/')}/twin/tables/{settings.twin_table}/rows/bulk"
+def _upload_one(settings, client, row: dict) -> bool:
+    """Upload one row. False when it is already present (idempotent skip)."""
+    url = f"{settings.twin_base_url.rstrip('/')}/twin/tables/{settings.twin_table}/rows"
     headers = {
-        "Authorization": f"Bearer {settings.hr_platform_api_key.get_secret_value()}",
+        "Authorization": f"Bearer {_clean_key(settings.hr_platform_api_key.get_secret_value())}",
         "Content-Type": "application/json",
     }
-    with httpx.Client(timeout=settings.twin_timeout_seconds) as client:
-        response = client.post(url, json={"rows": rows}, headers=headers)
-        response.raise_for_status()
-    print(response.json())
+    response = client.post(url, json={"values": row}, headers=headers)
+    if response.status_code == 409 or _is_duplicate(response):
+        return False
+    response.raise_for_status()
+    return True
 
 
 def main() -> int:
@@ -77,9 +78,13 @@ def main() -> int:
 
     rows = [build_row(event) for event in pending]
     sent = 0
-    for start in range(0, len(rows), BATCH):
-        _upload(settings, rows[start : start + BATCH])
-        sent += min(BATCH, len(rows) - start)
+    with httpx.Client(timeout=settings.twin_timeout_seconds) as client:
+        for row in rows:
+            try:
+                sent += 1 if _upload_one(settings, client, row) else 1
+            except httpx.HTTPError as exc:
+                print(f"stopping at {row['id']}: {type(exc).__name__}: {exc}")
+                break
 
     _save_checkpoint(already + sent)
     print(f"uploaded {sent} row(s); total {already + sent}")

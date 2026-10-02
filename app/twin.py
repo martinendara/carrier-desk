@@ -27,6 +27,27 @@ DEFAULT_BASE_URL = "https://platform.happyrobot.ai/api/v2"
 DEFAULT_TABLE = "call_events"
 
 
+def _clean_key(api_key: str) -> str:
+    """Strip whitespace and surrounding quotes from a pasted key.
+
+    A key copied from a terminal or a config file can arrive with a trailing
+    newline, surrounding spaces, or accidental single/double quotes — all of
+    which make the Bearer header wrong.
+    """
+    return api_key.strip().strip("'\"")
+
+
+def _is_duplicate(response: httpx.Response) -> bool:
+    """Whether a non-2xx is really "this id already exists" rather than a fault."""
+    if response.status_code >= 500:
+        return False
+    try:
+        text = response.text.lower()
+    except Exception:
+        return False
+    return any(token in text for token in ("duplicate", "already exist", "unique"))
+
+
 def event_id(event: Event) -> str:
     """A stable id, so retries and backfill do not insert duplicates.
 
@@ -84,8 +105,8 @@ class TwinWriter:
         client: httpx.Client | None = None,
     ) -> None:
         self._backup = backup
-        self._url = f"{base_url.rstrip('/')}/twin/tables/{table}/rows/bulk"
-        self._api_key = api_key
+        self._url = f"{base_url.rstrip('/')}/twin/tables/{table}/rows"
+        self._api_key = _clean_key(api_key)
         self._enabled = enabled
         self._timeout = timeout
         self._max_attempts = max_attempts
@@ -139,24 +160,31 @@ class TwinWriter:
         row = build_row(event)
         for attempt in range(self._max_attempts):
             try:
-                self._post({"rows": [row]})
+                inserted = self._post(row)
+                if not inserted:
+                    logger.info("twin row %s already present; skipping", row["id"])
                 return
-            except Exception as exc:
+            except httpx.HTTPStatusError as exc:
+                # A 4xx other than a duplicate (409 is handled in `_post`) is
+                # not worth retrying; a 5xx is.
+                if exc.response.status_code < 500:
+                    self._log_failure(row, exc)
+                    return
                 if attempt == self._max_attempts - 1:
-                    logger.warning(
-                        "twin upload failed after %d attempts for %s: %s; JSONL has it",
-                        self._max_attempts,
-                        row["id"],
-                        type(exc).__name__,
-                    )
-                else:
-                    time.sleep(0.2 * (2**attempt))
+                    self._log_failure(row, exc)
+            except httpx.TransportError as exc:
+                if attempt == self._max_attempts - 1:
+                    self._log_failure(row, exc)
+            if attempt < self._max_attempts - 1:
+                time.sleep(0.2 * (2**attempt))
 
-    def _post(self, body: dict[str, Any]) -> None:
+    def _post(self, row: dict[str, Any]) -> bool:
+        """Insert one row. True if inserted, False if the id already exists."""
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+        body = {"values": row}
         if self._client is not None:
             response = self._client.post(
                 self._url, json=body, headers=headers, timeout=self._timeout
@@ -164,4 +192,19 @@ class TwinWriter:
         else:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.post(self._url, json=body, headers=headers)
+        if response.status_code == 409 or _is_duplicate(response):
+            return False
         response.raise_for_status()
+        return True
+
+    def _log_failure(self, row: dict[str, Any], exc: Exception) -> None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "twin upload failed for %s after %d attempts: %s: %s (url=%s status=%s); JSONL has it",
+            row["id"],
+            self._max_attempts,
+            type(exc).__name__,
+            exc,
+            self._url,
+            status,
+        )

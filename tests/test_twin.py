@@ -67,7 +67,7 @@ def test_twin_writer_sends_and_keeps_the_backup():
 
     def handler(request):
         requests.append(request)
-        return httpx.Response(200, json={"success": True, "insertedCount": 1})
+        return httpx.Response(201, json={"success": True})
 
     writer = _writer(backup, httpx.MockTransport(handler))
     writer.emit("r", EventType.OTP_SENT, mc_number="123456")
@@ -75,10 +75,43 @@ def test_twin_writer_sends_and_keeps_the_backup():
 
     assert len(backup.events) == 1
     assert len(requests) == 1
+    assert requests[0].url.path.endswith("/twin/tables/call_events/rows")
     body = json.loads(requests[0].content)
-    assert body["rows"][0]["event_type"] == "otp_sent"
-    assert body["rows"][0]["mc_number"] == "123456"
+    assert set(body) == {"values"}
+    assert body["values"]["event_type"] == "otp_sent"
+    assert body["values"]["mc_number"] == "123456"
     assert requests[0].headers["Authorization"] == "Bearer test-key"
+
+
+def test_twin_writer_strips_a_pasted_key():
+    backup = InMemoryEventSink()
+    requests: list[httpx.Request] = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(201, json={"success": True})
+
+    writer = _writer(backup, httpx.MockTransport(handler), api_key='  "test-key"\n')
+    writer.emit("r", EventType.OTP_SENT, mc_number="1")
+    writer.close()
+
+    assert requests[0].headers["Authorization"] == "Bearer test-key"
+
+
+def test_twin_writer_treats_a_duplicate_as_success():
+    backup = InMemoryEventSink()
+    attempts: list[httpx.Request] = []
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(409, json={"error": "duplicate key value violates unique constraint"})
+
+    writer = _writer(backup, httpx.MockTransport(handler), max_attempts=3)
+    writer.emit("r", EventType.OTP_SENT, mc_number="1")
+    writer.close()
+
+    assert len(attempts) == 1  # a duplicate is success, not a retry
+    assert len(backup.events) == 1
 
 
 def test_twin_writer_failure_keeps_the_backup_and_retries(caplog):
