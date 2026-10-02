@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
+from app.mail import MailError, OutboundEmail
 from app.tms.models import LoadDetail
 
 #: Matches the recorded LOAD_GET sample: RATE 2073 under MAX_BUY 2528.
@@ -35,3 +37,23 @@ def make_load(
         status="OPEN",
         max_buy=max_buy,
     )
+
+
+class FakeMailer:
+    """Records sent emails; fails on demand. The code is in the body."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.sent: list[OutboundEmail] = []
+        self.fail = fail
+
+    def send(self, email: OutboundEmail) -> None:
+        if self.fail:
+            raise MailError("resend refused")
+        self.sent.append(email)
+
+    @property
+    def last_code(self) -> str | None:
+        if not self.sent:
+            return None
+        match = re.search(r"\d{6}", self.sent[-1].body)
+        return match.group(0) if match else None

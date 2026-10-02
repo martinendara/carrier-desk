@@ -16,7 +16,7 @@ from fractions import Fraction
 import httpx
 import pytest
 from conftest import ELIGIBLE_OVERRIDES, OTP_SECRET, TickClock, fmcsa_payload
-from helpers import RECORDED_CEILING, make_load
+from helpers import RECORDED_CEILING, FakeMailer, make_load
 
 from app.events import EventType, InMemoryEventSink
 from app.fmcsa import FmcsaClient
@@ -85,12 +85,12 @@ def test_a_full_call_never_puts_the_ceiling_in_front_of_the_agent(
     assert check.eligible
 
     # --- 2. Send and verify the OTP -------------------------------------
-    otp = OtpService(store, secret=OTP_SECRET, clock=tick, sink=events)
+    mailer = FakeMailer()
+    otp = OtpService(store, secret=OTP_SECRET, mailer=mailer, clock=tick, sink=events)
     dispatch = otp.send(RUN, MC)
     agent_facing.append(dispatch.agent_view)
-    assert dispatch.delivery_view is not None  # the platform gets the code
 
-    verification = otp.verify(RUN, dispatch.code)
+    verification = otp.verify(RUN, mailer.last_code)
     agent_facing.append(verification.agent_view)
     assert verification.verified
 
@@ -130,9 +130,10 @@ def test_a_full_call_never_puts_the_ceiling_in_front_of_the_agent(
 
 def test_the_event_log_covers_every_step_of_the_call(store, tick, events):
     fmcsa_for(BOOKABLE).check(MC)
-    otp = OtpService(store, secret=OTP_SECRET, clock=tick, sink=events)
-    dispatch = otp.send(RUN, MC)
-    otp.verify(RUN, dispatch.code)
+    mailer = FakeMailer()
+    otp = OtpService(store, secret=OTP_SECRET, mailer=mailer, clock=tick, sink=events)
+    otp.send(RUN, MC)
+    otp.verify(RUN, mailer.last_code)
 
     load = make_load()
     store.get_or_create(RUN).record_shown_load(load.load_id)
@@ -169,7 +170,7 @@ def test_a_carrier_we_cannot_verify_never_gets_an_otp(store, tick, events):
 def test_an_mc_with_no_contact_becomes_a_qualified_lead(store, tick, events):
     """The other way a call can end: no contact on file, so route the human."""
     unknown_mc = "999999"
-    otp = OtpService(store, secret=OTP_SECRET, clock=tick, sink=events)
+    otp = OtpService(store, secret=OTP_SECRET, mailer=FakeMailer(), clock=tick, sink=events)
     dispatch = otp.send(RUN, unknown_mc)
 
     assert dispatch.status.value == "routed_onboarding"

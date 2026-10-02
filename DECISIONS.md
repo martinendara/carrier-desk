@@ -1104,3 +1104,23 @@ same as "the same successful answer".
 
 **Why.** One `LOAD_BOOK` per agreed rate, per call — the rate is stored server-side and so
 is the outcome.
+
+---
+
+## 58. The service sends the OTP email itself
+
+**Problem.** The platform has email disabled and Google blocks the Gmail integration, but
+more fundamentally the previous design handed the plaintext code back to the platform in a
+`delivery` field — an accepted risk that the code could land in the run log.
+
+**Choice.** `send_otp` calls Resend's HTTP API directly (Bearer `RESEND_API_KEY`, a short
+timeout and one retry) and returns only a `masked_destination`. The code is generated,
+emailed and discarded inside this process.
+
+**Rejected.** *Return the code for the platform to deliver.* That is the leak this closes.
+*Use a different mail provider.* Resend is chosen because its free tier delivers to the
+account owner's own address, which is exactly the demo; production would use SMS or the
+client's provider behind the same `Mailer` interface.
+
+**Why.** The code never leaves the server, so there is no place for it to leak — not the
+tool result, not the run log.

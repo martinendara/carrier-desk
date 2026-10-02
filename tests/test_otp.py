@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import OTP_SECRET, TickClock
+from helpers import FakeMailer
 
 from app.carriers import directory
 from app.events import EventType
@@ -30,6 +31,7 @@ UNKNOWN_MC = "999999"
 def make_service(store, tick: TickClock, events=None, **overrides) -> OtpService:
     options = {
         "secret": OTP_SECRET,
+        "mailer": FakeMailer(),
         "ttl_seconds": 300,
         "max_attempts": 3,
         "max_resends": 1,
@@ -114,44 +116,46 @@ def test_the_stored_value_is_not_the_code():
 
 
 def test_send_reaches_the_contact_on_file(store, tick):
-    dispatch = make_service(store, tick).send("run-1", KNOWN_MC)
+    service = make_service(store, tick)
+    dispatch = service.send("run-1", KNOWN_MC)
 
     assert dispatch.status is DispatchStatus.SENT
-    assert dispatch.destination == directory.lookup(KNOWN_MC).email
-    assert dispatch.masked_destination == mask_email(dispatch.destination)
+    assert dispatch.masked_destination == mask_email(directory.lookup(KNOWN_MC).email)
+    assert service._mailer.sent[0].to == directory.lookup(KNOWN_MC).email
 
 
 def test_the_agent_view_carries_no_code_and_no_address(store, tick):
     dispatch = make_service(store, tick).send("run-1", KNOWN_MC)
 
     assert dispatch.agent_view == {"masked_destination": dispatch.masked_destination}
-    assert dispatch.code not in str(dispatch.agent_view)
-    assert dispatch.destination not in str(dispatch.agent_view)
+    assert not hasattr(dispatch, "code")
+    assert not hasattr(dispatch, "destination")
 
 
-def test_the_delivery_view_carries_the_code_for_the_platform(store, tick):
-    dispatch = make_service(store, tick).send("run-1", KNOWN_MC)
+def test_the_email_carries_the_code_for_the_carrier(store, tick):
+    service = make_service(store, tick)
+    service.send("run-1", KNOWN_MC)
 
-    assert dispatch.delivery_view == {
-        "destination": dispatch.destination,
-        "code": dispatch.code,
-    }
+    email = service._mailer.sent[0]
+    assert email.to == directory.lookup(KNOWN_MC).email
+    assert email.subject == "Your HappyRobot Logistics verification code"
+    assert service._mailer.last_code in email.body
 
 
-def test_the_code_is_not_in_the_dispatch_repr(store, tick):
+def test_the_dispatch_repr_does_not_leak_the_code(store, tick):
     """A stray log of the object must not print the code."""
-    dispatch = make_service(store, tick).send("run-1", KNOWN_MC)
+    service = make_service(store, tick)
+    dispatch = service.send("run-1", KNOWN_MC)
 
-    assert dispatch.code not in repr(dispatch)
-    assert dispatch.destination not in repr(dispatch)
+    assert service._mailer.last_code not in repr(dispatch)
 
 
 def test_only_the_digest_is_stored(store, tick):
-    dispatch = make_service(store, tick).send("run-1", KNOWN_MC)
+    service = make_service(store, tick)
+    service.send("run-1", KNOWN_MC)
 
     challenge = store.get("run-1").otp
-    assert challenge.code_hmac != dispatch.code
-    assert dispatch.code not in challenge.code_hmac
+    assert service._mailer.last_code not in challenge.code_hmac
 
 
 def test_an_mc_with_no_contact_is_routed_to_onboarding(store, tick):
@@ -160,18 +164,29 @@ def test_an_mc_with_no_contact_is_routed_to_onboarding(store, tick):
 
     assert dispatch.status is DispatchStatus.ROUTED_ONBOARDING
     assert dispatch.agent_view == {"result_code": "routed_onboarding"}
-    assert dispatch.code is None
-    assert dispatch.delivery_view is None
     assert store.get("run-1").otp is None
 
 
 def test_the_code_never_reaches_the_event_log(store, tick, events):
-    dispatch = make_service(store, tick, events).send("run-1", KNOWN_MC)
+    service = make_service(store, tick, events)
+    service.send("run-1", KNOWN_MC)
 
-    assert dispatch.code not in "".join(str(event.payload) for event in events.events)
-    assert events.of_type(EventType.OTP_SENT)[0].payload["destination"] == mask_email(
-        dispatch.destination
+    assert service._mailer.last_code not in "".join(
+        str(event.payload) for event in events.events
     )
+    assert events.of_type(EventType.OTP_SENT)[0].payload["destination"] == mask_email(
+        directory.lookup(KNOWN_MC).email
+    )
+
+
+def test_a_failed_email_is_send_failed_and_issues_nothing(store, tick):
+    service = make_service(store, tick, mailer=FakeMailer(fail=True))
+
+    dispatch = service.send("run-1", KNOWN_MC)
+
+    assert dispatch.status is DispatchStatus.SEND_FAILED
+    assert dispatch.result_code == "otp_failed"
+    assert store.get("run-1").otp is None
 
 
 # --- verifying ----------------------------------------------------------
@@ -179,9 +194,9 @@ def test_the_code_never_reaches_the_event_log(store, tick, events):
 
 def test_the_right_code_verifies(store, tick):
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
 
-    result = service.verify("run-1", dispatch.code)
+    result = service.verify("run-1", service._mailer.last_code)
 
     assert result.verified
     assert result.agent_view == {"verified": True, "attempts_left": 3}
@@ -214,11 +229,11 @@ def test_three_wrong_codes_lock_the_session(store, tick):
 def test_a_locked_session_refuses_the_right_code(store, tick):
     """The lock is absolute: guessing wrong three times ends the OTP path."""
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
     for _ in range(3):
         service.verify("run-1", "000000")
 
-    result = service.verify("run-1", dispatch.code)
+    result = service.verify("run-1", service._mailer.last_code)
 
     assert not result.verified
     assert result.failure is OtpFailure.LOCKED
@@ -237,10 +252,10 @@ def test_a_malformed_code_still_costs_an_attempt(store, tick):
 
 def test_an_expired_code_is_refused(store, tick):
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
     tick.advance(minutes=5)
 
-    result = service.verify("run-1", dispatch.code)
+    result = service.verify("run-1", service._mailer.last_code)
 
     assert not result.verified
     assert result.failure is OtpFailure.EXPIRED
@@ -248,16 +263,16 @@ def test_an_expired_code_is_refused(store, tick):
 
 def test_a_code_is_still_good_just_before_it_expires(store, tick):
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
     tick.advance(minutes=4, seconds=59)
 
-    assert service.verify("run-1", dispatch.code).verified
+    assert service.verify("run-1", service._mailer.last_code).verified
 
 
 def test_verifying_twice_is_idempotent(store, tick):
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
-    service.verify("run-1", dispatch.code)
+    service.send("run-1", KNOWN_MC)
+    service.verify("run-1", service._mailer.last_code)
 
     again = service.verify("run-1", "000000")
 
@@ -276,10 +291,11 @@ def test_verifying_without_a_challenge_is_refused(store, tick):
 
 def test_a_code_from_another_call_does_not_work(store, tick):
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
+    first_code = service._mailer.last_code
     service.send("run-2", KNOWN_MC)
 
-    result = service.verify("run-2", dispatch.code)
+    result = service.verify("run-2", first_code)
 
     assert not result.verified
     assert result.failure is OtpFailure.MISMATCH
@@ -290,13 +306,15 @@ def test_a_code_from_another_call_does_not_work(store, tick):
 
 def test_a_resend_issues_a_new_code_and_retires_the_old_one(store, tick):
     service = make_service(store, tick)
-    first = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
+    first_code = service._mailer.last_code
     second = service.resend("run-1")
+    second_code = service._mailer.last_code
 
     assert second.status is DispatchStatus.SENT
-    assert second.code != first.code
-    assert not service.verify("run-1", first.code).verified
-    assert service.verify("run-1", second.code).verified
+    assert second_code != first_code
+    assert not service.verify("run-1", first_code).verified
+    assert service.verify("run-1", second_code).verified
 
 
 def test_only_one_resend_is_allowed(store, tick):
@@ -347,8 +365,8 @@ def test_a_locked_session_cannot_be_resent(store, tick):
 
 def test_a_verified_session_cannot_be_resent(store, tick):
     service = make_service(store, tick)
-    dispatch = service.send("run-1", KNOWN_MC)
-    service.verify("run-1", dispatch.code)
+    service.send("run-1", KNOWN_MC)
+    service.verify("run-1", service._mailer.last_code)
 
     assert service.resend("run-1").status is DispatchStatus.ALREADY_VERIFIED
 
@@ -378,9 +396,9 @@ def test_a_short_secret_is_refused(store, tick):
 
 def test_the_events_record_the_whole_lifecycle(store, tick, events):
     service = make_service(store, tick, events)
-    dispatch = service.send("run-1", KNOWN_MC)
+    service.send("run-1", KNOWN_MC)
     service.verify("run-1", "000000")
-    service.verify("run-1", dispatch.code)
+    service.verify("run-1", service._mailer.last_code)
 
     assert len(events.of_type(EventType.OTP_SENT)) == 1
     assert len(events.of_type(EventType.OTP_FAILED)) == 1
@@ -389,7 +407,7 @@ def test_the_events_record_the_whole_lifecycle(store, tick, events):
 
 def test_a_sink_is_optional(store, tick):
     """Nothing has to be optional upstream just to keep this testable."""
-    service = OtpService(store, secret=OTP_SECRET, clock=tick)
+    service = OtpService(store, secret=OTP_SECRET, mailer=FakeMailer(), clock=tick)
 
     assert service.send("run-1", KNOWN_MC).status is DispatchStatus.SENT
 

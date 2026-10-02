@@ -76,27 +76,11 @@ class OtpSendRequest(RunRequest):
     """
 
 
-class OtpDelivery(BaseModel):
-    """**For the platform's delivery node only.**
-
-    Map these into a hidden Tool Call Result field so they stay available to
-    later nodes and never enter the agent's conversation context. `code` is the
-    plaintext code; `destination` is the full address on file.
-    """
-
-    destination: str = Field(..., description="Full contact address. Send the code here.")
-    code: str = Field(..., description="The plaintext OTP. Never expose to the agent.")
-
-
 class OtpSendResponse(BaseModel):
-    status: str = Field(..., description="sent | routed_onboarding | resend_limit_reached | already_verified | locked")
+    status: str = Field(..., description="sent | routed_onboarding | resend_limit_reached | already_verified | locked | send_failed")
     masked_destination: str | None = Field(
         default=None,
         description="AGENT-FACING. Safe to speak: 'm***@gmail.com'.",
-    )
-    delivery: OtpDelivery | None = Field(
-        default=None,
-        description="PLATFORM-ONLY. Must not reach the agent's context.",
     )
     result_code: str | None = None
     say: str

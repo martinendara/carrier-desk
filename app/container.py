@@ -70,6 +70,12 @@ def _enforce_production_guards(settings: Settings) -> None:
             'print(secrets.token_urlsafe(32))"'
         )
 
+    if not settings.resend_api_key.get_secret_value():
+        raise ConfigurationError(
+            "RESEND_API_KEY is empty and ENV=production. The OTP email could "
+            "not be sent. Set it to the key for Resend's HTTP API."
+        )
+
 
 def build_event_sink(settings: Settings) -> EventSink:
     """JSONL on disk, or in memory for the tests."""

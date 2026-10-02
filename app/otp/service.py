@@ -1,15 +1,9 @@
 """The OTP flow: issue a code to the contact on file, then check it.
 
-Two audiences, deliberately kept apart:
-
-* ``delivery_view`` — carries the plaintext code. Goes to the platform's
-  delivery node and nowhere else.
-* ``agent_view`` — carries the masked destination. This is what may end up in
-  the conversation.
-
-The service documents which is which; keeping them apart in the response is the
-platform's job (Tool Call Result). One rule is enforced here regardless: a code
-is never written to an event, a log line, or any agent-facing field.
+The service sends the code itself (via :class:`app.mail.Mailer`), so the
+plaintext code never leaves this process. The only thing that may end up in the
+conversation is the masked destination. A code is never written to an event, a
+log line, or any agent-facing field.
 """
 
 from __future__ import annotations
@@ -22,6 +16,7 @@ from typing import Callable
 
 from app.carriers import directory
 from app.events import EventSink, EventType, NullEventSink
+from app.mail import MailError, Mailer, OutboundEmail, ResendMailer
 from app.otp.security import WeakSecretError, generate_code, hash_code, mask_email, verify_code
 from app.results import ResultCode
 from app.sessions import RunSessionStore, SessionNotFound, utcnow
@@ -37,6 +32,13 @@ DEFAULT_MAX_RESENDS = 1
 #: between a leaked digest and a live code. Refuse to start rather than pretend.
 MIN_SECRET_BYTES = 16
 
+#: The email the code rides in. The expiry must match ``otp_ttl_seconds``.
+OTP_EMAIL_SUBJECT = "Your HappyRobot Logistics verification code"
+OTP_EMAIL_BODY = (
+    "Your verification code is {code}. It expires in 5 minutes. "
+    "If you didn't request it, you can ignore this email."
+)
+
 
 class DispatchStatus(str, Enum):
     """What happened when we tried to send a code."""
@@ -47,6 +49,8 @@ class DispatchStatus(str, Enum):
     RESEND_LIMIT_REACHED = "resend_limit_reached"
     ALREADY_VERIFIED = "already_verified"
     LOCKED = "locked"
+    #: The email could not be delivered. Nothing was issued.
+    SEND_FAILED = "send_failed"
 
 
 class OtpFailure(str, Enum):
@@ -60,15 +64,15 @@ class OtpFailure(str, Enum):
 
 @dataclass(frozen=True)
 class OtpDispatch:
-    """The result of a send or resend, split by audience."""
+    """The result of a send or resend.
+
+    There is no code and no address here: the service sends the email itself, so
+    the plaintext code never leaves this process.
+    """
 
     status: DispatchStatus
     run_id: str
     masked_destination: str | None = None
-    #: Plaintext code and full address. repr=False so a stray log of this object
-    #: does not print either of them.
-    code: str | None = field(default=None, repr=False)
-    destination: str | None = field(default=None, repr=False)
 
     @property
     def agent_view(self) -> dict[str, object]:
@@ -76,13 +80,6 @@ class OtpDispatch:
         if self.status is DispatchStatus.SENT:
             return {"masked_destination": self.masked_destination}
         return {"result_code": self.result_code}
-
-    @property
-    def delivery_view(self) -> dict[str, str] | None:
-        """For the platform's delivery node. The only place the code appears."""
-        if self.code is None or self.destination is None:
-            return None
-        return {"destination": self.destination, "code": self.code}
 
     @property
     def result_code(self) -> str | None:
@@ -118,6 +115,7 @@ class OtpService:
         store: RunSessionStore,
         *,
         secret: bytes,
+        mailer: Mailer,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         max_resends: int = DEFAULT_MAX_RESENDS,
@@ -131,6 +129,7 @@ class OtpService:
             )
         self._store = store
         self._secret = secret
+        self._mailer = mailer
         self._ttl = ttl_seconds
         self._max_attempts = max_attempts
         self._max_resends = max_resends
@@ -145,6 +144,10 @@ class OtpService:
         return cls(
             store,
             secret=settings.otp_hmac_secret.get_secret_value().encode("utf-8"),
+            mailer=ResendMailer(
+                settings.resend_api_key.get_secret_value(),
+                timeout=settings.resend_timeout_seconds,
+            ),
             ttl_seconds=settings.otp_ttl_seconds,
             max_attempts=settings.otp_max_attempts,
             max_resends=settings.otp_max_resends,
@@ -207,6 +210,21 @@ class OtpService:
 
         now = self._clock()
         code = generate_code()
+
+        # Send first, store second: if the email fails, nothing was issued and
+        # the resend budget is untouched.
+        try:
+            self._mailer.send(
+                OutboundEmail(
+                    to=contact.email,
+                    subject=OTP_EMAIL_SUBJECT,
+                    body=OTP_EMAIL_BODY.format(code=code),
+                )
+            )
+        except MailError:
+            logger.warning("OTP email for %s could not be sent", mask_email(contact.email))
+            return OtpDispatch(status=DispatchStatus.SEND_FAILED, run_id=session.run_id)
+
         challenge = OtpChallenge(
             code_hmac=hash_code(self._secret, session.run_id, code),
             destination=contact.email,
@@ -238,8 +256,6 @@ class OtpService:
             status=DispatchStatus.SENT,
             run_id=session.run_id,
             masked_destination=challenge.masked_destination,
-            code=code,
-            destination=contact.email,
         )
 
     # --- verifying ------------------------------------------------------

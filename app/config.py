@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     otp_ttl_seconds: int = 300
     otp_max_attempts: int = 3
     otp_max_resends: int = 1
+
+    #: Key for Resend's HTTP API. The service sends the OTP email itself, so
+    #: the plaintext code never transits the platform.
+    resend_api_key: SecretStr = SecretStr("")
+    resend_timeout_seconds: float = 5.0
     #: Attempts allowed per MC per hour, across every call. The per-call lock is
     #: three; without this, a new run_id buys three more.
     otp_verify_rate_limit_per_hour: int = 5

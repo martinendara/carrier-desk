@@ -67,27 +67,19 @@ for this `run_id`. There is nothing for the agent to name.
 
 | field | audience | note |
 |---|---|---|
-| `status` | Agent | `sent` \| `routed_onboarding` \| `resend_limit_reached` \| `already_verified` \| `locked` (also when no carrier was verified) |
+| `status` | Agent | `sent` \| `routed_onboarding` \| `resend_limit_reached` \| `already_verified` \| `locked` (also when no carrier was verified) \| `send_failed` |
 | `masked_destination` | Agent | e.g. `m***@gmail.com` — safe to say |
 | `result_code` | Agent (routing) | `null` \| `routed_onboarding` \| `otp_failed` |
 | `say` | Agent | speak this |
-| `delivery` | **Hidden** | `{destination, code}` — plaintext code + full email. **Must not reach the agent.** |
 
-**Retries / blocking / end call.** Retries: 1 (idempotent — but a retry after a
-lost response issues a fresh code, which spends the one resend; acceptable, the
+No `delivery` field: the service sends the email itself, so the plaintext code
+never transits the platform.
+
+**Retries / blocking / end call.** Retries: 1 (idempotent — a retry after a lost
+response issues a fresh code, which spends the one resend; acceptable, the
 server caps it). Blocking: yes. End call: no.
 
-**Additional node (required).** The `delivery` object feeds a separate email
-node, not the conversation:
-
-1. Map `delivery.code` and `delivery.destination` into two **hidden Tool Call
-   Result** fields (e.g. `otp_code`, `otp_email`). The agent never sees them.
-2. Add a downstream **HappyRobot Email** node (built-in, no credentials):
-   - **To** (recipient) = `{{otp_email}}`
-   - **Subject** = `Your verification code`
-   - **Body** = short text that includes `{{otp_code}}`
-
-The agent only speaks `say` (`"I've sent a six digit code to …m***@gmail.com."`).
+**Additional node.** None — the email is sent server-side (Resend).
 
 ---
 

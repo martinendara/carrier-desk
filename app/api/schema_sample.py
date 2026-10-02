@@ -20,7 +20,6 @@ from app.api.schemas import (
     LoadSearchResponse,
     NegotiationCounterResponse,
     NegotiationOpenResponse,
-    OtpDelivery,
     OtpSendResponse,
     OtpVerifyResponse,
 )
@@ -54,7 +53,6 @@ def sample_send_otp() -> OtpSendResponse:
     return OtpSendResponse(
         status="sent",
         masked_destination="s***@example.com",
-        delivery=OtpDelivery(destination="sample@example.com", code="000000"),
         result_code=None,
         say="I've sent a six digit code to the email we have on file, s***@example.com.",
     )

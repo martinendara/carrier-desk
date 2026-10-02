@@ -1,14 +1,8 @@
 """OTP send and verify.
 
-`/otp/send` returns two views in separate, documented fields, and this is the
-one place in the API where that matters enough to spell out:
-
-* ``masked_destination`` — agent-facing. Safe to say out loud.
-* ``delivery`` — for the platform's send node only. Carries the plaintext code.
-
-The platform keeps them apart by mapping `delivery` into a hidden Tool Call
-Result field, which stays available to later nodes and never enters the agent's
-conversation context. Nothing in the agent-facing fields repeats it.
+The service sends the code itself (see `app/mail.py`), so `/otp/send` returns
+only an agent-facing view: a `masked_destination` and a `say`. The plaintext
+code never leaves this process and never appears in a response.
 """
 
 from __future__ import annotations
@@ -18,14 +12,13 @@ from fastapi import APIRouter, Depends, status
 from app.api import phrasing
 from app.api.deps import get_container, session_for
 from app.api.errors import ApiError
+from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_send_otp, sample_verify_otp
 from app.api.schemas import (
-    OtpDelivery,
     OtpSendRequest,
     OtpSendResponse,
     OtpVerifyRequest,
     OtpVerifyResponse,
 )
-from app.api.schema_sample import SCHEMA_SAMPLE_RUN_ID, sample_send_otp, sample_verify_otp
 from app.container import Container
 from app.otp import DispatchStatus, OtpFailure
 from app.results import ResultCode
@@ -37,6 +30,7 @@ _SAY_BY_STATUS = {
     DispatchStatus.RESEND_LIMIT_REACHED: phrasing.OTP_RESEND_LIMIT,
     DispatchStatus.ALREADY_VERIFIED: phrasing.OTP_ALREADY_VERIFIED,
     DispatchStatus.LOCKED: phrasing.OTP_LOCKED,
+    DispatchStatus.SEND_FAILED: phrasing.OTP_SEND_FAILED,
 }
 
 
@@ -69,14 +63,12 @@ def send_otp(
         return OtpSendResponse(
             status=DispatchStatus.LOCKED.value,
             masked_destination=None,
-            delivery=None,
             result_code=ResultCode.OTP_FAILED.value,
             say=phrasing.OTP_NOT_VERIFIED,
         )
 
     dispatch = container.otp.send(payload.run_id, session.mc_number)
 
-    delivery = dispatch.delivery_view
     if dispatch.status is DispatchStatus.SENT:
         say = phrasing.OTP_SENT.format(masked=dispatch.masked_destination)
     else:
@@ -85,7 +77,6 @@ def send_otp(
     return OtpSendResponse(
         status=dispatch.status.value,
         masked_destination=dispatch.masked_destination,
-        delivery=OtpDelivery(**delivery) if delivery else None,
         result_code=dispatch.result_code,
         say=say,
     )

@@ -16,6 +16,7 @@ import httpx
 import pytest
 from conftest import ELIGIBLE_OVERRIDES, NOW, fmcsa_payload
 from fastapi.testclient import TestClient
+from helpers import FakeMailer
 
 from app.config import Settings
 from app.fmcsa import FmcsaClient
@@ -59,6 +60,8 @@ def api_app(**overrides):
     # FMCSA blocks Argentina, so the real client cannot be used here. Swapping
     # it is the only seam these tests need.
     container.fmcsa = fmcsa_returning(BOOKABLE)
+    # The service sends email itself; tests use a fake that records the code.
+    container.otp._mailer = FakeMailer()
     client = TestClient(app)
     try:
         yield client, container
@@ -84,11 +87,11 @@ def verify_carrier(client, run_id: str, mc: str = KNOWN_MC) -> dict:
 
 
 def become_verified(client, run_id: str, mc: str = KNOWN_MC) -> str:
-    """Run the carrier through OTP and return the plaintext code from delivery."""
+    """Run the carrier through OTP; return the code the fake mailer captured."""
     verify_carrier(client, run_id, mc)
     sent = client.post("/otp/send", json={"run_id": run_id}, headers=HEADERS)
     assert sent.status_code == 200, sent.text
-    code = sent.json()["delivery"]["code"]
+    code = client.app.state.container.otp._mailer.last_code
 
     checked = client.post(
         "/otp/verify", json={"run_id": run_id, "code": code}, headers=HEADERS
@@ -383,8 +386,8 @@ def test_a_bad_mc_is_refused_before_any_lookup(api):
 # --- OTP ----------------------------------------------------------------
 
 
-def test_send_returns_the_two_views_in_separate_fields(api):
-    client, _ = api
+def test_send_returns_the_agent_facing_view_only(api):
+    client, container = api
     verify_carrier(client, "run-1")
 
     body = client.post(
@@ -392,12 +395,11 @@ def test_send_returns_the_two_views_in_separate_fields(api):
     ).json()
 
     assert body["status"] == "sent"
-    # Agent-facing: masked only.
     assert body["masked_destination"].startswith("d***@")
-    assert body["delivery"]["code"] not in json.dumps(body["masked_destination"])
-    # Platform-only: the code and the full address.
-    assert len(body["delivery"]["code"]) == 6
-    assert "@" in body["delivery"]["destination"]
+    assert body["result_code"] is None
+    assert "delivery" not in body
+    # The code lives only in the mailer the service used, never in the response.
+    assert len(container.otp._mailer.last_code) == 6
 
 
 def test_send_without_a_prior_verify_is_locked(api):
@@ -407,7 +409,7 @@ def test_send_without_a_prior_verify_is_locked(api):
     body = client.post("/otp/send", json={"run_id": "fresh-run"}, headers=HEADERS).json()
 
     assert body["status"] == "locked"
-    assert body["delivery"] is None
+    assert "delivery" not in body
     assert body["result_code"] == "otp_failed"
 
 
@@ -423,29 +425,27 @@ def test_send_refuses_an_mc_number_in_the_body(api):
     assert response.status_code == 422
 
 
-def test_the_agent_facing_fields_never_carry_the_code(api):
-    client, _ = api
+def test_the_response_never_carries_the_code(api):
+    client, container = api
     verify_carrier(client, "run-1")
 
     body = client.post(
         "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
     ).json()
 
-    agent_facing = {k: v for k, v in body.items() if k != "delivery"}
-    assert body["delivery"]["code"] not in json.dumps(agent_facing)
-    assert body["delivery"]["destination"] not in json.dumps(agent_facing)
+    assert container.otp._mailer.last_code not in json.dumps(body)
 
 
 def test_the_full_address_is_never_in_the_spoken_line(api):
-    client, _ = api
+    client, container = api
     verify_carrier(client, "run-1")
 
     body = client.post(
         "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
     ).json()
 
-    assert body["delivery"]["destination"] not in body["say"]
-    assert body["delivery"]["code"] not in body["say"]
+    assert container.otp._mailer.sent[0].to not in body["say"]
+    assert container.otp._mailer.last_code not in body["say"]
 
 
 def test_an_mc_with_no_contact_is_routed_to_onboarding(api):
@@ -457,8 +457,22 @@ def test_an_mc_with_no_contact_is_routed_to_onboarding(api):
     ).json()
 
     assert body["status"] == "routed_onboarding"
-    assert body["delivery"] is None
+    assert "delivery" not in body
     assert body["result_code"] == "routed_onboarding"
+
+
+def test_a_failed_email_is_send_failed(api):
+    client, container = api
+    verify_carrier(client, "run-1")
+    container.otp._mailer = FakeMailer(fail=True)
+
+    body = client.post(
+        "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
+    ).json()
+
+    assert body["status"] == "send_failed"
+    assert body["result_code"] == "otp_failed"
+    assert "colleague" in body["say"]
 
 
 def test_a_wrong_code_reports_attempts_left(api):
@@ -1247,7 +1261,7 @@ def test_empty_secrets_are_still_fine_in_development():
 
 
 _SCHEMA_SAMPLE_CALLS = [
-    ("/otp/send", {"run_id": "schema-sample"}, {"status", "masked_destination", "delivery", "result_code", "say"}),
+    ("/otp/send", {"run_id": "schema-sample"}, {"status", "masked_destination", "result_code", "say"}),
     ("/otp/verify", {"run_id": "schema-sample", "code": "000000"}, {"verified", "attempts_left", "result_code", "say"}),
     ("/loads/search", {"run_id": "schema-sample"}, {"loads", "count", "result_code", "say"}),
     ("/negotiations", {"run_id": "schema-sample", "load_id": "LD-SAMPLE"}, {"load_id", "offer", "say"}),
@@ -1268,13 +1282,12 @@ def test_schema_sample_returns_every_field(api, path, body, keys):
     assert keys <= set(response.json())
 
 
-def test_schema_sample_send_otp_carries_the_delivery_fields(api):
+def test_schema_sample_send_otp_has_no_delivery(api):
     client, _ = api
 
     body = client.post("/otp/send", json={"run_id": "schema-sample"}, headers=HEADERS).json()
 
-    assert body["delivery"]["code"] == "000000"
-    assert body["delivery"]["destination"] == "sample@example.com"
+    assert "delivery" not in body
 
 
 def test_schema_sample_search_returns_a_full_load(api):
