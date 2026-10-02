@@ -327,6 +327,7 @@ def test_the_authority_record_is_fetched_once_the_authority_is_active(caplog):
 
     with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
         check = client.check("123456")
+        client.join_recon()  # the authority fetch runs on a background thread
 
     assert check.eligible
     assert check.authority_active

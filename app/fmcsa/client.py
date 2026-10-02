@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from typing import Any
 
 import httpx
@@ -249,6 +250,9 @@ class FmcsaClient:
         self._web_key = web_key
         self._timeout = timeout
         self._client = client
+        #: Background reconnaissance fetches. Joined by tests; never awaited in
+        #: production, so a slow authority endpoint cannot delay the verdict.
+        self._recon_threads: list[threading.Thread] = []
 
     @classmethod
     def from_settings(cls, settings, **overrides) -> "FmcsaClient":
@@ -285,9 +289,20 @@ class FmcsaClient:
         check = self._interpret(mc, payload)
 
         if check.authority_active and check.dot_number:
-            self.authority_record(check.dot_number)
+            # Fire-and-forget: the authority record only feeds authority_age_days
+            # later, and the verdict is already decided. Do not make the carrier
+            # wait on it.
+            dot = check.dot_number
+            thread = threading.Thread(target=self.authority_record, args=(dot,), daemon=True)
+            self._recon_threads.append(thread)
+            thread.start()
 
         return check
+
+    def join_recon(self, timeout: float | None = None) -> None:
+        """Wait for any background authority fetches. Used by tests."""
+        for thread in self._recon_threads:
+            thread.join(timeout=timeout)
 
     # --- transport ------------------------------------------------------
 

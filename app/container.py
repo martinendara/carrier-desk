@@ -23,6 +23,7 @@ from app.rate_limit import SlidingWindowLimiter
 from app.sessions import RunSessionStore
 from app.tms.client import TmsClient
 from app.tms.fake_server import FakeTms, start_fake_tms
+from app.twin import TwinWriter
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,16 @@ class Container:
 
         store = RunSessionStore(ttl_seconds=settings.run_session_ttl_seconds)
         sink = build_event_sink(settings)
+        if settings.twin_enabled:
+            sink = TwinWriter(
+                sink,
+                base_url=settings.twin_base_url,
+                api_key=settings.twin_api_key.get_secret_value(),
+                table=settings.twin_table,
+                enabled=True,
+                timeout=settings.twin_timeout_seconds,
+                max_attempts=settings.twin_max_attempts,
+            )
 
         fake = None
         if settings.tms_mode.strip().lower() == "fake":
@@ -184,3 +195,5 @@ class Container:
         if self.fake_tms is not None:
             self.fake_tms.stop()
             self.fake_tms = None
+        if isinstance(self.sink, TwinWriter):
+            self.sink.close()
