@@ -47,7 +47,9 @@ did not receive — a second call is a resend, and there is only one.
 | name | source | type | example | required |
 |---|---|---|---|---|
 | `run_id` | Fixed value (Run ID chip) | string | — | yes |
-| `mc_number` | Agent decides | string | `107012` | yes |
+
+No `mc_number`: the server sends to whatever carrier `verify_carrier` recorded
+for this `run_id`. There is nothing for the agent to name.
 
 **Child node (Webhook).**
 
@@ -57,8 +59,7 @@ did not receive — a second call is a resend, and there is only one.
 - Body:
 ```json
 {
-  "run_id": "{{$var:<tool>.run_id}}",
-  "mc_number": "{{$var:<tool>.mc_number}}"
+  "run_id": "{{$var:<tool>.run_id}}"
 }
 ```
 
@@ -66,7 +67,7 @@ did not receive — a second call is a resend, and there is only one.
 
 | field | audience | note |
 |---|---|---|
-| `status` | Agent | `sent` \| `routed_onboarding` \| `resend_limit_reached` \| `already_verified` \| `locked` |
+| `status` | Agent | `sent` \| `routed_onboarding` \| `resend_limit_reached` \| `already_verified` \| `locked` (also when no carrier was verified) |
 | `masked_destination` | Agent | e.g. `m***@gmail.com` — safe to say |
 | `result_code` | Agent (routing) | `null` \| `routed_onboarding` \| `otp_failed` |
 | `say` | Agent | speak this |
@@ -136,7 +137,8 @@ Blocking: yes. End call: no.
 
 **Description (agent).** Search matching loads by origin, destination, equipment
 or pickup date. Call only after the OTP is verified. Do not call before
-verification, and do not invent filters the carrier did not give.
+verification, and do not invent filters the carrier did not give. On no matches,
+take the caller's details and end the call — do not hand off.
 
 **Parameters.**
 
@@ -178,7 +180,7 @@ At least one filter is required. Only the fields the carrier gave go in the body
 
 Load object fields (agent-visible): `load_id`, `orig_city`, `orig_state`,
 `orig_zip`, `dest_city`, `dest_state`, `dest_zip`, `pickup_dt`, `eqtype`,
-`rate`, `miles`, `status`.
+`miles`, `status`. No `rate` — the price comes only from `open_negotiation`.
 
 **Retries / blocking / end call.** Retries: 1 (idempotent read). Blocking: yes.
 End call: no.
@@ -268,8 +270,8 @@ same offer). Blocking: yes. End call: no.
 
 **Description (agent).** Send the carrier's counter-offer (a dollar amount) and
 get `accept` / `counter` / `close`. Call once per carrier counter, after
-`open_negotiation`. Do not call to open a negotiation, and do not send a number
-the carrier did not say.
+`open_negotiation`. On `close`, end the call — do not hand off. Do not call to
+open a negotiation, and do not send a number the carrier did not say.
 
 **Parameters.**
 
@@ -303,8 +305,8 @@ that.
 
 **Retries / blocking / end call.** Retries: 1 — safe now: the server replays the
 same decision when the same `carrier_ask` arrives again within 15 s, without
-consuming a round. Blocking: yes. End call: no (on `close`, the prompt routes to
-`handoff`).
+consuming a round. Blocking: yes. End call: no (on `close`, the agent ends the
+call directly — no handoff).
 
 **Additional node.** None.
 
@@ -354,16 +356,20 @@ could double-book. Blocking: yes. End call: no — `handoff` still follows; on
 
 ## 8. `handoff` — POST `/handoff`
 
-**Description (agent).** Hand the call to a senior rep. Call when the flow cannot
-proceed — no matching loads, no contact on file, negotiation closed or booking
-pending — or when the carrier asks for a human. Do not call it to skip steps.
+**Description (agent).** Hand the call to a senior rep. Call only to close out a
+booked or pending booking, to route a carrier with no contact on file, or when
+the caller asks for a human. Do not call it for a closed negotiation or an empty
+search — those end the call on their own.
+
+**Message (said before the tool runs).** `Connecting you with a rep now, hang
+tight.`
 
 **Parameters.**
 
 | name | source | type | example | required |
 |---|---|---|---|---|
 | `run_id` | Fixed value (Run ID chip) | string | — | yes |
-| `reason` | Agent decides | string | `negotiation_failed` | no |
+| `reason` | Agent decides | string | `booking_pending` | no |
 
 `reason` is optional; any string is accepted and an unrecognised one is recorded
 as `requested`.
@@ -388,8 +394,8 @@ as `requested`.
 | `say` | Agent | speak this |
 
 **Retries / blocking / end call.** Retries: 1 (idempotent — a repeat opens a
-second ticket, harmless). Blocking: yes. End call: yes (terminal — a rep takes
-over).
+second ticket, harmless). Blocking: yes. End call: **yes** — the call is cut as
+soon as the tool returns; the caller only hears the `Message` above.
 
 **Additional node.** None.
 
@@ -407,16 +413,20 @@ verified for the same `run_id`.
 
 ## End call — only `handoff`
 
-`handoff` is the only tool with **end call = yes**. It is the last node of the
-happy path, and every other "this call is over" moment is *conditional* — it ends
-either in a handoff or in a goodbye the agent still has to speak:
+`handoff` is the only tool with **end call = yes**. "End call after this tool"
+cuts the call the moment the tool returns, with no agent turn — the caller hears
+only the tool's `Message`, which is said *before* the call runs. That is why
+`handoff` carries a fixed `Message` ("Connecting you with a rep now, hang
+tight.") and does not depend on the result.
+
+Every other "this call is over" moment is *conditional*, so it stays with the
+prompt rather than a blanket end call:
 
 - `verify_carrier` (`eligible: false`) — the agent reads the polite `say` and
-  ends, but the outcome is conditional, so it cannot be a blanket end call;
-  leave it to the prompt.
-- `counter_offer` (`action: close`) — the copy is "let me have someone follow
-  up", so it should route to `handoff`, not end the call on the spot.
-- `book_load` — always followed by `handoff` (confirm or pending).
-
-So: leave termination to the prompt everywhere except `handoff`, where the call
-is genuinely handed off and there is nothing left for the agent to say.
+  ends. Conditional, so no end call.
+- `search_loads` (`no_match`) — the agent takes details and ends; the demand is
+  recorded server-side. No handoff, no end call.
+- `counter_offer` (`action: close`) — the agent ends the call directly; the gap
+  is recorded server-side (`negotiation_failed`). No handoff, no end call.
+- `book_load` — no end call: the agent must say `booked` vs `booking_pending`
+  from the result, and `handoff` follows either way.

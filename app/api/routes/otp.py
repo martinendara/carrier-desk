@@ -16,7 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, status
 
 from app.api import phrasing
-from app.api.deps import get_container
+from app.api.deps import get_container, session_for
 from app.api.errors import ApiError
 from app.api.schemas import (
     OtpDelivery,
@@ -27,6 +27,7 @@ from app.api.schemas import (
 )
 from app.container import Container
 from app.otp import DispatchStatus, OtpFailure
+from app.results import ResultCode
 
 router = APIRouter(tags=["otp"])
 
@@ -53,8 +54,23 @@ def send_otp(
     payload: OtpSendRequest,
     container: Container = Depends(get_container),
 ) -> OtpSendResponse:
-    """Send a code to the contact on file, or route the call to onboarding."""
-    dispatch = container.otp.send(payload.run_id, payload.mc_number)
+    """Send a code to the contact on file, or route the call to onboarding.
+
+    The MC comes from the session, not the request: `verify_carrier` recorded
+    it. Without a prior verification there is nothing to send to, and it is
+    refused rather than sent to whatever MC the agent names.
+    """
+    session = session_for(container, payload.run_id)
+    if session.mc_number is None:
+        return OtpSendResponse(
+            status=DispatchStatus.LOCKED.value,
+            masked_destination=None,
+            delivery=None,
+            result_code=ResultCode.OTP_FAILED.value,
+            say=phrasing.OTP_NOT_VERIFIED,
+        )
+
+    dispatch = container.otp.send(payload.run_id, session.mc_number)
 
     delivery = dispatch.delivery_view
     if dispatch.status is DispatchStatus.SENT:

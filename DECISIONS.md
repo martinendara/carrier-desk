@@ -979,3 +979,55 @@ number.* That would hand the agent a value it can drop, replay or invent — the
 **Why.** A voice round trip takes longer than 15 s; a webhook retry is far shorter. The
 window is what tells the two apart, and it makes `counter_offer` safe to retry (retries =
 1 in `docs/platform-tools.md`).
+
+---
+
+## 51. `send_otp` sends to the verified MC, not a named one
+
+**Problem.** `send_otp` took an `mc_number` from the agent, so the agent could verify one
+carrier and then ask for a code to another.
+
+**Choice.** `verify_carrier` records the checked MC on the session; `send_otp` drops the
+`mc_number` parameter and sends to that recorded MC. No prior verification returns `locked`
+(`otp_failed`). Sending an `mc_number` at all is a 422.
+
+**Rejected.** *Keep the parameter and compare it to the session.* That still lets the agent
+name a carrier, and the only safe reading of "the agent supplied it" is "it is not to be
+trusted" — so do not even accept it.
+
+**Why.** The code goes to the carrier this call verified, and there is no field through
+which a different one can be named.
+
+---
+
+## 52. The agent never sees the posted rate
+
+**Problem.** `search_loads`/`get_load` returned `rate` (the posted rate). When the posted
+rate sits above `MAX_BUY`, the opening offer is `0.90 × C`, so quoting the posted rate
+would hand the carrier a number above the ceiling.
+
+**Choice.** `Load.public_dict()` drops `rate`, and the detail's spoken line says nothing
+about price. The number the agent may quote comes only from `open_negotiation`.
+
+**Rejected.** *Keep `rate` and tell the agent not to say it.* An instruction is a leak
+waiting to happen; a field that is not serialised cannot be spoken.
+
+**Why.** The ceiling stays hidden behind the same wall as the rate: neither ever reaches
+the agent-facing response.
+
+---
+
+## 53. Only `handoff` ends the call
+
+**Problem.** Several tools looked terminal, but most "ends" are conditional and some should
+hand off rather than hang up.
+
+**Choice.** `handoff` is the only tool with **end call = yes**; its `Message`
+("Connecting you with a rep now, hang tight.") is said before the call runs, because an
+end-call cuts the conversation the moment the tool returns. `counter_offer` `close` and
+`search_loads` `no_match` end the call *without* a handoff (the gap/demand are recorded
+server-side); `book_load` has no end call because the agent must say `booked` vs
+`booking_pending` and then hand off.
+
+**Why.** End call must never depend on a result the agent still has to read out loud —
+that is what the prompt is for.

@@ -86,7 +86,7 @@ def verify_carrier(client, run_id: str, mc: str = KNOWN_MC) -> dict:
 def become_verified(client, run_id: str, mc: str = KNOWN_MC) -> str:
     """Run the carrier through OTP and return the plaintext code from delivery."""
     verify_carrier(client, run_id, mc)
-    sent = client.post("/otp/send", json={"run_id": run_id, "mc_number": mc}, headers=HEADERS)
+    sent = client.post("/otp/send", json={"run_id": run_id}, headers=HEADERS)
     assert sent.status_code == 200, sent.text
     code = sent.json()["delivery"]["code"]
 
@@ -128,7 +128,7 @@ def test_health_says_nothing_about_configuration(api):
     ("method", "path", "body"),
     [
         ("post", "/carriers/verify", {"run_id": "r", "mc_number": "123456"}),
-        ("post", "/otp/send", {"run_id": "r", "mc_number": "123456"}),
+        ("post", "/otp/send", {"run_id": "r"}),
         ("post", "/otp/verify", {"run_id": "r", "code": "000000"}),
         ("post", "/loads/search", {"run_id": "r"}),
         ("get", "/loads/LD00896", None),
@@ -328,7 +328,7 @@ def test_the_gate_opens_once_the_code_is_verified(api):
 def test_a_failed_otp_leaves_the_call_unverified(api):
     client, _ = api
     verify_carrier(client, "run-1")
-    client.post("/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS)
+    client.post("/otp/send", json={"run_id": "run-1"}, headers=HEADERS)
 
     client.post("/otp/verify", json={"run_id": "run-1", "code": "000000"}, headers=HEADERS)
     response = client.post("/loads/search", json={"run_id": "run-1"}, headers=HEADERS)
@@ -386,7 +386,7 @@ def test_send_returns_the_two_views_in_separate_fields(api):
     verify_carrier(client, "run-1")
 
     body = client.post(
-        "/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+        "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
     ).json()
 
     assert body["status"] == "sent"
@@ -398,12 +398,35 @@ def test_send_returns_the_two_views_in_separate_fields(api):
     assert "@" in body["delivery"]["destination"]
 
 
+def test_send_without_a_prior_verify_is_locked(api):
+    """The MC comes from verify_carrier; without it there is nothing to send to."""
+    client, _ = api
+
+    body = client.post("/otp/send", json={"run_id": "fresh-run"}, headers=HEADERS).json()
+
+    assert body["status"] == "locked"
+    assert body["delivery"] is None
+    assert body["result_code"] == "otp_failed"
+
+
+def test_send_refuses_an_mc_number_in_the_body(api):
+    """The agent cannot name a different MC than the one that was verified."""
+    client, _ = api
+    verify_carrier(client, "run-1")
+
+    response = client.post(
+        "/otp/send", json={"run_id": "run-1", "mc_number": "999999"}, headers=HEADERS
+    )
+
+    assert response.status_code == 422
+
+
 def test_the_agent_facing_fields_never_carry_the_code(api):
     client, _ = api
     verify_carrier(client, "run-1")
 
     body = client.post(
-        "/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+        "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
     ).json()
 
     agent_facing = {k: v for k, v in body.items() if k != "delivery"}
@@ -416,7 +439,7 @@ def test_the_full_address_is_never_in_the_spoken_line(api):
     verify_carrier(client, "run-1")
 
     body = client.post(
-        "/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS
+        "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
     ).json()
 
     assert body["delivery"]["destination"] not in body["say"]
@@ -428,7 +451,7 @@ def test_an_mc_with_no_contact_is_routed_to_onboarding(api):
     verify_carrier(client, "run-1", UNKNOWN_MC)
 
     body = client.post(
-        "/otp/send", json={"run_id": "run-1", "mc_number": UNKNOWN_MC}, headers=HEADERS
+        "/otp/send", json={"run_id": "run-1"}, headers=HEADERS
     ).json()
 
     assert body["status"] == "routed_onboarding"
@@ -439,7 +462,7 @@ def test_an_mc_with_no_contact_is_routed_to_onboarding(api):
 def test_a_wrong_code_reports_attempts_left(api):
     client, _ = api
     verify_carrier(client, "run-1")
-    client.post("/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS)
+    client.post("/otp/send", json={"run_id": "run-1"}, headers=HEADERS)
 
     body = client.post(
         "/otp/verify", json={"run_id": "run-1", "code": "000000"}, headers=HEADERS
@@ -453,7 +476,7 @@ def test_a_wrong_code_reports_attempts_left(api):
 def test_three_wrong_codes_lock_the_call(api):
     client, _ = api
     verify_carrier(client, "run-1")
-    client.post("/otp/send", json={"run_id": "run-1", "mc_number": KNOWN_MC}, headers=HEADERS)
+    client.post("/otp/send", json={"run_id": "run-1"}, headers=HEADERS)
 
     body = {}
     for _ in range(3):
@@ -506,6 +529,22 @@ def test_no_load_response_ever_contains_max_buy(api):
         assert "MAX_BUY" not in text
 
 
+def test_no_load_response_exposes_the_posted_rate(api):
+    """The price the agent quotes comes only from open_negotiation."""
+    client, _ = api
+    become_verified(client, "run-1")
+
+    search_body = search(client, "run-1", equipment="DRY_VAN")
+    load_id = search_body["loads"][0]["load_id"]
+    detail = client.get(
+        f"/loads/{load_id}", params={"run_id": "run-1"}, headers=HEADERS
+    ).json()
+
+    for load in search_body["loads"]:
+        assert "rate" not in load
+    assert "rate" not in detail["load"]
+
+
 def test_search_with_no_matches_says_so(api):
     client, _ = api
     become_verified(client, "run-1")
@@ -522,6 +561,29 @@ def test_search_without_filters_is_a_speakable_error(api):
     become_verified(client, "run-1")
 
     response = client.post("/loads/search", json={"run_id": "run-1"}, headers=HEADERS)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
+
+
+def test_empty_string_filters_are_treated_as_absent(api):
+    """The platform sends "" for parameters the agent left blank."""
+    client, _ = api
+    become_verified(client, "run-1")
+
+    body = search(client, "run-1", equipment="DRY_VAN", orig_city="", dest_state="")
+
+    assert body["count"] > 0
+
+
+def test_all_empty_string_filters_mean_no_filters(api):
+    client, _ = api
+    become_verified(client, "run-1")
+
+    response = client.post(
+        "/loads/search", json={"run_id": "run-1", "orig_city": "", "dest_state": ""},
+        headers=HEADERS,
+    )
 
     assert response.status_code == 422
     assert response.json()["error"] == "invalid_request"
@@ -872,8 +934,9 @@ def test_a_search_that_finds_nothing_is_still_recorded(api):
 
 
 def _wrong_code_attempt(client, run_id: str, mc: str = KNOWN_MC):
-    """One send plus one deliberately wrong verify, for a fresh call."""
-    client.post("/otp/send", json={"run_id": run_id, "mc_number": mc}, headers=HEADERS)
+    """One verify + send plus one deliberately wrong verify, for a fresh call."""
+    verify_carrier(client, run_id, mc)
+    client.post("/otp/send", json={"run_id": run_id}, headers=HEADERS)
     return client.post(
         "/otp/verify", json={"run_id": run_id, "code": "000000"}, headers=HEADERS
     )

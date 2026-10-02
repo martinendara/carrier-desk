@@ -112,11 +112,13 @@ def load_detail(
 
 
 def _describe(load) -> str:
-    """One sentence the agent can read out about this load."""
+    """One sentence the agent can read out about this load.
+
+    No rate: the price comes from `open_negotiation`, not the pitch.
+    """
     return (
         f"That one picks up in {load.orig_city}, {load.orig_state} "
-        f"and delivers to {load.dest_city}, {load.dest_state}. "
-        f"The rate is {load.rate} dollars."
+        f"and delivers to {load.dest_city}, {load.dest_state}."
     )
 
 

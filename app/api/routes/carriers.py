@@ -38,8 +38,10 @@ def verify_carrier(
     session = session_for(container, payload.run_id)
     check = container.fmcsa.check(payload.mc_number)
 
-    # Note: this deliberately does not touch `session.mc_number`. That field is
-    # what binds a verified OTP to an MC, and only OtpService.send may set it.
+    # Record the MC this call verified. `send_otp` reads it back, so the code
+    # always goes to the carrier the call verified — never one the agent names
+    # later in the OTP step.
+    session.mc_number = check.mc_number
     session.fmcsa_eligible = check.eligible
 
     container.sink.emit(

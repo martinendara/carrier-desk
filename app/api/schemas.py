@@ -68,7 +68,12 @@ class CarrierVerifyResponse(BaseModel):
 
 
 class OtpSendRequest(RunRequest):
-    mc_number: str = Field(..., description="MC number, digits only, 1-8 characters.")
+    """Ask for a code for the carrier this call already verified.
+
+    There is deliberately no `mc_number` here: the MC is whatever
+    `verify_carrier` recorded for this `run_id`, so a caller cannot verify one
+    carrier and then request a code for another.
+    """
 
 
 class OtpDelivery(BaseModel):

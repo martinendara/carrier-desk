@@ -132,6 +132,11 @@ def test_public_dict_never_exposes_max_buy():
     assert 2528 not in public.values()
 
 
+def test_public_dict_never_exposes_the_posted_rate():
+    """The price the agent may quote comes only from open_negotiation."""
+    assert "rate" not in _detail().public_dict()
+
+
 def test_public_dict_is_json_ready():
     public = _detail().public_dict()
 

@@ -120,8 +120,14 @@ class Load(BaseModel):
         return self.status.strip().upper() == "OPEN"
 
     def public_dict(self) -> dict[str, object]:
-        """Serialisable view safe to hand to the voice agent."""
-        data = self.model_dump(exclude={"extra"}, mode="json")
+        """Serialisable view safe to hand to the voice agent.
+
+        `rate` (the posted rate) is excluded too: the price the agent may quote
+        comes only from `open_negotiation`, never from a search or detail
+        response. If the posted rate sits above the ceiling, quoting it would
+        leak a number above what we will pay.
+        """
+        data = self.model_dump(exclude={"extra", "rate"}, mode="json")
         data.update(self.extra)
         return data
 
