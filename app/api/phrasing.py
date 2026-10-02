@@ -133,7 +133,7 @@ ASK_CLARIFY = "Sorry, I want to make sure I heard you right. What rate are you a
 
 # --- booking and handoff ------------------------------------------------
 
-BOOKED = "You're all set — that load is booked."
-BOOKING_PENDING = "I've put a hold on that load. A rep will confirm the details shortly."
+BOOKED = "You're all set, that load is booked. I'm connecting you with a rep now to wrap up the paperwork."
+BOOKING_PENDING = "A rep will confirm your booking in a few minutes. I'm connecting you with them now."
 BOOKING_FAILED = "I couldn't complete that booking. Let me have someone call you back."
 HANDOFF = "I've asked a rep to pick this up. They'll be with you shortly."

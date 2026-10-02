@@ -811,6 +811,18 @@ def test_a_confirmed_booking_reports_booked(api):
     assert body["status"] == "booked"
     assert body["result_code"] == "booked"
     assert body["booking_ref"]
+    assert "connecting you with a rep" in body["say"]
+
+
+def test_a_pending_booking_hands_off_in_its_say(api):
+    client, container = api
+    _agree_a_rate(client)
+    container.fake_tms.book_result = BOOK_ALREADY
+
+    body = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert body["status"] == "booked_unconfirmed"
+    assert "connecting you with them" in body["say"]
 
 
 def test_the_rate_comes_from_the_session_not_the_request(api):
