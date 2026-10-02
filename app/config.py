@@ -7,11 +7,12 @@ variable names.
 
 from __future__ import annotations
 
+import os
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,19 @@ class Settings(BaseSettings):
     #: `development` or `production`. Only production turns on the startup
     #: guards; nothing else keys off it.
     env: str = "development"
+
+    #: Build/revision marker surfaced on `/health` so a deploy can be confirmed
+    #: against a commit. Prefers APP_VERSION; falls back to Render's
+    #: auto-injected RENDER_GIT_COMMIT; "unknown" otherwise.
+    app_version: str = "unknown"
+
+    @model_validator(mode="after")
+    def _resolve_version(self) -> "Settings":
+        if self.app_version == "unknown":
+            render_sha = os.environ.get("RENDER_GIT_COMMIT")
+            if render_sha:
+                self.app_version = render_sha
+        return self
 
     # --- Legacy TMS -----------------------------------------------------
     #: `live` talks to TMS_HOST; `fake` starts the in-process server from

@@ -298,6 +298,7 @@ open a negotiation, and do not send a number the carrier did not say.
 |---|---|---|
 | `action` | Agent | `accept` \| `counter` \| `close` |
 | `amount` | Agent | integer, dollars |
+| `result_code` | Agent (routing) | `negotiation_failed` on `close`, else `null` — hidden from the agent, counted by the platform |
 | `say` | Agent | speak this |
 
 Nothing else is returned — no ceiling, no gap, no step. The server owns all of

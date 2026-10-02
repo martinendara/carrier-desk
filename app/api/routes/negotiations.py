@@ -20,6 +20,7 @@ from app.api.schemas import (
 from app.container import Container
 from app.deadline import Deadline
 from app.negotiation import NegotiationAction
+from app.results import ResultCode
 
 router = APIRouter(tags=["negotiations"])
 
@@ -68,8 +69,16 @@ def counter_offer(
 
     decision = container.negotiation.counter(payload.run_id, payload.carrier_ask)
 
+    # Only a close is a terminal result; accept and counter leave the call open.
+    result_code = (
+        ResultCode.NEGOTIATION_FAILED.value
+        if decision.action is NegotiationAction.CLOSE
+        else None
+    )
+
     return NegotiationCounterResponse(
         action=decision.action.value,
         amount=decision.amount,
+        result_code=result_code,
         say=_SAY[decision.action].format(amount=decision.amount),
     )

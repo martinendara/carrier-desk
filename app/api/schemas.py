@@ -163,6 +163,10 @@ class NegotiationCounterRequest(RunRequest):
 class NegotiationCounterResponse(BaseModel):
     action: str = Field(..., description="accept | counter | close")
     amount: int = Field(..., description="The agreed rate, the counter, or the last offer.")
+    result_code: str | None = Field(
+        default=None,
+        description="negotiation_failed when the ladder closes without a deal; null otherwise.",
+    )
     say: str
 
 

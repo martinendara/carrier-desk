@@ -1031,3 +1031,22 @@ server-side); `book_load` has no end call because the agent must say `booked` vs
 
 **Why.** End call must never depend on a result the agent still has to read out loud —
 that is what the prompt is for.
+
+---
+
+## 54. Every tool response carries a result code for Twin
+
+**Problem.** `counter_offer` returned `{action, amount, say}` with no result code, so a
+close (the terminal `negotiation_failed` outcome) could not be counted on the same column
+as the other outcomes in Twin.
+
+**Choice.** Add `result_code` to `counter_offer`: `negotiation_failed` when `action` is
+`close`, and `null` for `accept`/`counter` (those leave the call open). Like `verify_carrier`,
+the code rides in the response for the platform to read and is hidden from the agent in
+Tool Call Result — the agent speaks `say`.
+
+**Rejected.** *Return `negotiation_failed` only.* `accept`/`counter` are not terminal, so
+they stay `null`; a code for them would fabricate an outcome that has not happened yet.
+
+**Why.** One column of result codes is what lets Twin aggregate how calls end without
+reading per-tool action strings.

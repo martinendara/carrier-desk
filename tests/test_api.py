@@ -115,7 +115,9 @@ def test_health_needs_no_auth(api):
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert "version" in body
 
 
 def test_health_says_nothing_about_configuration(api):
@@ -660,8 +662,9 @@ def test_a_counter_returns_only_an_action_and_an_amount(api):
         "/negotiations/counter", json={"run_id": "run-1", "carrier_ask": 99999}, headers=HEADERS
     ).json()
 
-    assert set(body) == {"action", "amount", "say"}
+    assert set(body) == {"action", "amount", "result_code", "say"}
     assert body["action"] in {"accept", "counter", "close"}
+    assert body["result_code"] is None  # a counter, not a close, carries no code
 
 
 def test_three_rounds_end_the_negotiation(api):
@@ -679,6 +682,24 @@ def test_three_rounds_end_the_negotiation(api):
         actions.append(body["action"])
 
     assert actions == ["counter", "counter", "close"]
+
+
+def test_a_close_carries_the_negotiation_failed_code(api):
+    """The platform counts outcomes on one column; close must carry its code."""
+    client, _ = api
+    load_id = _negotiable_load(client)
+    client.post("/negotiations", json={"run_id": "run-1", "load_id": load_id}, headers=HEADERS)
+
+    body = {}
+    for ask in (99999, 99998, 99997):
+        body = client.post(
+            "/negotiations/counter",
+            json={"run_id": "run-1", "carrier_ask": ask},
+            headers=HEADERS,
+        ).json()
+
+    assert body["action"] == "close"
+    assert body["result_code"] == "negotiation_failed"
 
 
 def test_a_fourth_round_is_refused(api):
@@ -1036,7 +1057,7 @@ def test_the_guard_is_case_and_space_insensitive(env_name):
 
 def test_fake_tms_is_fine_in_development():
     with api_app(env="development", tms_mode="fake") as (client, _):
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json()["status"] == "ok"
 
 
 def test_live_tms_is_fine_in_production():
@@ -1194,4 +1215,4 @@ def test_the_tms_mode_guard_is_reported_first():
 def test_empty_secrets_are_still_fine_in_development():
     """The guards are production-only; development stays forgiving."""
     with api_app(env="development", service_api_key="dev-key", otp_hmac_secret=SECRET) as (client, _):
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json()["status"] == "ok"

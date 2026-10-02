@@ -78,7 +78,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["health"], summary="Liveness. No auth.")
     def health() -> dict[str, str]:
         # Deliberately says nothing about configuration: this endpoint is
-        # unauthenticated, and which TMS mode we are in is not public.
-        return {"status": "ok"}
+        # unauthenticated, and which TMS mode we are in is not public. The
+        # revision is just a build marker so a deploy can be confirmed.
+        return {"status": "ok", "version": settings.app_version}
 
     return app
