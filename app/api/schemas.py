@@ -15,7 +15,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+#: The run_id the platform's "Generate" button sends to capture a tool's schema.
+SCHEMA_SAMPLE_RUN_ID = "schema-sample"
 
 #: Anything the agent might be asked to say. Kept out of the way at the bottom.
 RUN_ID = Field(
@@ -37,12 +40,25 @@ class Request(BaseModel):
 class RunRequest(Request):
     run_id: str = RUN_ID
 
+    @field_validator("run_id")
+    @classmethod
+    def _strip_run_id(cls, value: str) -> str:
+        """Trim surrounding spaces: the platform's Generate button sends
+        `"schema-sample   "`, and a real run_id must not carry stray whitespace."""
+        return value.strip()
+
 
 # --- carriers -----------------------------------------------------------
 
 
 class CarrierVerifyRequest(RunRequest):
-    mc_number: str = Field(..., description="MC number, digits only, 1-8 characters.")
+    mc_number: str | None = Field(default=None, description="MC number, digits only, 1-8 characters.")
+
+    @model_validator(mode="after")
+    def _require_mc_number(self) -> "CarrierVerifyRequest":
+        if self.run_id != SCHEMA_SAMPLE_RUN_ID and self.mc_number is None:
+            raise ValueError("mc_number is required")
+        return self
 
 
 class CarrierVerifyResponse(BaseModel):
@@ -87,7 +103,13 @@ class OtpSendResponse(BaseModel):
 
 
 class OtpVerifyRequest(RunRequest):
-    code: str = Field(..., description="The six digits the carrier read back.")
+    code: str | None = Field(default=None, description="The six digits the carrier read back.")
+
+    @model_validator(mode="after")
+    def _require_code(self) -> "OtpVerifyRequest":
+        if self.run_id != SCHEMA_SAMPLE_RUN_ID and self.code is None:
+            raise ValueError("code is required")
+        return self
 
 
 class OtpVerifyResponse(BaseModel):
@@ -131,7 +153,13 @@ class LoadDetailResponse(BaseModel):
 
 
 class NegotiationOpenRequest(RunRequest):
-    load_id: str = Field(..., description="A load that was shown during this call.")
+    load_id: str | None = Field(default=None, description="A load that was shown during this call.")
+
+    @model_validator(mode="after")
+    def _require_load_id(self) -> "NegotiationOpenRequest":
+        if self.run_id != SCHEMA_SAMPLE_RUN_ID and self.load_id is None:
+            raise ValueError("load_id is required")
+        return self
 
 
 class NegotiationOpenResponse(BaseModel):
@@ -141,7 +169,13 @@ class NegotiationOpenResponse(BaseModel):
 
 
 class NegotiationCounterRequest(RunRequest):
-    carrier_ask: int = Field(..., gt=0, description="What the carrier asked for, in dollars.")
+    carrier_ask: int | None = Field(default=None, description="What the carrier asked for, in dollars.")
+
+    @model_validator(mode="after")
+    def _require_carrier_ask(self) -> "NegotiationCounterRequest":
+        if self.run_id != SCHEMA_SAMPLE_RUN_ID and self.carrier_ask is None:
+            raise ValueError("carrier_ask is required")
+        return self
 
 
 class NegotiationCounterResponse(BaseModel):

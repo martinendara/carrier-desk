@@ -222,7 +222,7 @@ def test_a_missing_field_says_which_field_is_missing(api, caplog):
         client.post("/carriers/verify", json={"run_id": "run-1"}, headers=HEADERS)
 
     assert "mc_number" in caplog.text
-    assert "missing" in caplog.text
+    assert "required" in caplog.text
 
 
 def test_an_agent_cannot_smuggle_an_id_field(api):
@@ -1321,6 +1321,51 @@ def test_schema_sample_send_otp_has_no_delivery(api):
     body = client.post("/otp/send", json={"run_id": "schema-sample"}, headers=HEADERS).json()
 
     assert "delivery" not in body
+
+
+def test_schema_sample_matches_a_run_id_with_spaces(api):
+    """The Generate button sends `run_id` with trailing spaces."""
+    client, _ = api
+
+    body = client.post(
+        "/otp/send", json={"run_id": "schema-sample   "}, headers=HEADERS
+    ).json()
+
+    assert body["status"] == "sent"
+
+
+@pytest.mark.parametrize(
+    ("path", "keys"),
+    [
+        ("/carriers/verify", {"eligible", "result_code", "legal_name", "say"}),
+        ("/otp/verify", {"verified", "attempts_left", "result_code", "say"}),
+        ("/negotiations", {"load_id", "offer", "say"}),
+        ("/negotiations/counter", {"action", "amount", "result_code", "say"}),
+    ],
+)
+def test_schema_sample_works_with_an_incomplete_body(api, path, keys):
+    """Generate omits required fields; schema-sample still returns the shape."""
+    client, _ = api
+
+    response = client.post(
+        path, json={"run_id": "schema-sample   "}, headers=HEADERS
+    )
+
+    assert response.status_code == 200
+    assert keys <= set(response.json())
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/carriers/verify", "/otp/verify", "/negotiations", "/negotiations/counter"],
+)
+def test_a_real_request_still_requires_the_field(api, path):
+    """Outside schema-sample, a missing required field is still a 422."""
+    client, _ = api
+
+    response = client.post(path, json={"run_id": "real-run"}, headers=HEADERS)
+
+    assert response.status_code == 422
 
 
 def test_schema_sample_search_returns_a_full_load(api):

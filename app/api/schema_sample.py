@@ -15,6 +15,7 @@ still required because auth is a router-level dependency that runs first.
 from __future__ import annotations
 
 from app.api.schemas import (
+    SCHEMA_SAMPLE_RUN_ID,
     BookingResponse,
     CarrierVerifyResponse,
     HandoffResponse,
@@ -24,8 +25,6 @@ from app.api.schemas import (
     OtpSendResponse,
     OtpVerifyResponse,
 )
-
-SCHEMA_SAMPLE_RUN_ID = "schema-sample"
 
 #: A load with every public field a real search returns. No `rate`, no
 #: `max_buy` — the same shape the agent actually sees.
