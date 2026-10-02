@@ -1,5 +1,6 @@
 -- carrier-desk call activity in HappyRobot Twin (PostgreSQL).
--- Paste this whole file into the Twin SQL console.
+-- Paste this whole file into the Twin SQL console. It is re-runnable: the table
+-- is created if missing, and every view is dropped and recreated.
 
 -- One row per service event. `details` (jsonb) carries the full event payload;
 -- the scalar columns are the fields the dashboard filters and joins on.
@@ -25,10 +26,95 @@ CREATE TABLE IF NOT EXISTS call_events (
 CREATE INDEX IF NOT EXISTS call_events_run_idx ON call_events (run_id, occurred_at);
 CREATE INDEX IF NOT EXISTS call_events_type_idx ON call_events (event_type);
 
+-- Views, dropped in reverse-dependency order and recreated in dependency order.
+DROP VIEW IF EXISTS v_kpi_overview CASCADE;
+DROP VIEW IF EXISTS v_calls CASCADE;
+DROP VIEW IF EXISTS v_funnel CASCADE;
+DROP VIEW IF EXISTS v_call_timeline CASCADE;
+
+-- ---------------------------------------------------------------------------
+-- v_call_timeline: the events of one call in order, with a readable label.
+-- ---------------------------------------------------------------------------
+CREATE VIEW v_call_timeline AS
+SELECT
+    run_id,
+    occurred_at,
+    event_type,
+    id,
+    details,
+    CASE event_type
+        WHEN 'fmcsa_checked' THEN
+            'FMCSA: ' || COALESCE(details->>'legal_name', mc_number, '') ||
+            CASE WHEN (details->>'eligible')::boolean
+                 THEN ' eligible'
+                 ELSE ' rejected (' || COALESCE(details->>'reason', '') || ')'
+            END
+        WHEN 'otp_sent' THEN
+            'OTP sent to ' || COALESCE(details->>'destination', '') ||
+            CASE WHEN (details->>'resend')::boolean THEN ' (resend)' ELSE '' END
+        WHEN 'otp_verified' THEN 'OTP verified'
+        WHEN 'otp_failed' THEN
+            'OTP failed (' || COALESCE(details->>'reason', '') || ', ' ||
+            COALESCE((details->>'attempts_left')::text, '') || ' left)'
+        WHEN 'search_performed' THEN
+            'Search: ' || COALESCE((details->>'results')::text, '0') || ' result(s)'
+        WHEN 'load_pitched' THEN 'Pitched ' || COALESCE(load_id, 'a load')
+        WHEN 'negotiation_opened' THEN
+            'Offer $' || COALESCE((details->>'opening_offer')::text, '')
+        WHEN 'negotiation_round' THEN
+            'Round ' || COALESCE((details->>'round')::text, '') || ': ' ||
+            COALESCE(details->>'action', '') ||
+            CASE WHEN details->>'carrier_ask' IS NOT NULL
+                 THEN ' ask $' || (details->>'carrier_ask') ELSE '' END ||
+            CASE WHEN details->>'offer' IS NOT NULL
+                 THEN ' -> $' || (details->>'offer') ELSE '' END
+        WHEN 'negotiation_closed' THEN
+            'Negotiation ' || COALESCE(details->>'outcome', '') ||
+            CASE WHEN details->>'agreed_rate' IS NOT NULL
+                 THEN ' at $' || (details->>'agreed_rate') ELSE '' END
+        WHEN 'booking_attempted' THEN
+            'Booking at $' || COALESCE((details->>'agreed_rate')::text, '')
+        WHEN 'booking_result' THEN 'Booking ' || COALESCE(details->>'status', '')
+        WHEN 'handoff_created' THEN 'Handoff: ' || COALESCE(details->>'reason', '')
+        WHEN 'lead_created' THEN 'Lead: ' || COALESCE(details->>'temperature', '')
+        ELSE event_type
+    END AS label
+FROM call_events
+ORDER BY run_id, occurred_at;
+
+-- ---------------------------------------------------------------------------
+-- v_funnel: stage counts, with the drop between each stage.
+-- ---------------------------------------------------------------------------
+CREATE VIEW v_funnel AS
+WITH stages AS (
+    SELECT
+        count(DISTINCT run_id) AS calls,
+        count(DISTINCT run_id) FILTER (
+            WHERE event_type = 'fmcsa_checked' AND (details->>'eligible')::boolean
+        ) AS fmcsa_ok,
+        count(DISTINCT run_id) FILTER (WHERE event_type = 'otp_verified') AS otp_ok,
+        count(DISTINCT run_id) FILTER (
+            WHERE event_type = 'search_performed' AND (details->>'results')::int > 0
+        ) AS load_found,
+        count(DISTINCT run_id) FILTER (
+            WHERE event_type = 'negotiation_closed' AND details->>'outcome' = 'accepted'
+        ) AS agreed,
+        count(DISTINCT run_id) FILTER (
+            WHERE event_type = 'booking_result' AND details->>'status' = 'booked'
+        ) AS booked
+    FROM call_events
+)
+SELECT 'calls' AS stage, calls AS count FROM stages
+UNION ALL SELECT 'fmcsa_ok', fmcsa_ok FROM stages
+UNION ALL SELECT 'otp_ok', otp_ok FROM stages
+UNION ALL SELECT 'load_found', load_found FROM stages
+UNION ALL SELECT 'agreed', agreed FROM stages
+UNION ALL SELECT 'booked', booked FROM stages;
+
 -- ---------------------------------------------------------------------------
 -- v_calls: one row per call, with the fields the Call record card shows.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_calls AS
+CREATE VIEW v_calls AS
 WITH bounds AS (
     SELECT run_id, min(occurred_at) AS started_at, max(occurred_at) AS ended_at
     FROM call_events GROUP BY run_id
@@ -84,7 +170,6 @@ SELECT
     f.mc_number,
     f.carrier_name,
     o.otp_verified IS TRUE AS otp_verified,
-    o.otp_verified,
     -- final outcome, in the priority order a rep reads it
     CASE
         WHEN bk.booking_status = 'booked' THEN 'booked'
@@ -119,7 +204,7 @@ LEFT JOIN handed h   USING (run_id);
 -- ---------------------------------------------------------------------------
 -- v_kpi_overview: one row of headline numbers.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_kpi_overview AS
+CREATE VIEW v_kpi_overview AS
 WITH calls AS (SELECT * FROM v_calls),
 north AS (
     SELECT count(*) FILTER (WHERE outcome IN ('booked', 'booking_pending')
@@ -128,8 +213,7 @@ north AS (
     FROM calls
 ),
 margins AS (
-    SELECT count(*) FILTER (WHERE agreed_rate IS NOT NULL) AS booked_loads,
-           sum(protected_margin_usd) AS total_margin_usd,
+    SELECT sum(protected_margin_usd) AS total_margin_usd,
            avg(protected_margin_usd) AS avg_margin_usd
     FROM calls
 ),
@@ -150,14 +234,13 @@ onboarding AS (
 ),
 rules AS (
     SELECT
-        count(*) FILTER (WHERE agreed_rate > ceiling) AS bookings_over_ceiling,
+        count(*) FILTER (WHERE agreed_rate > max_buy) AS bookings_over_ceiling,
         count(*) FILTER (WHERE (event_type = 'negotiation_opened' OR event_type = 'booking_result')
                          AND run_id NOT IN (SELECT run_id FROM call_events WHERE event_type = 'otp_verified'))
              AS otp_bypasses
     FROM call_events
 )
 SELECT
-    -- North Star: booked at/below ceiling over OTP-verified calls
     CASE WHEN n.otp_verified_calls > 0
          THEN round(100.0 * n.booked_at_or_under / n.otp_verified_calls, 1)
     END AS north_star_pct,
@@ -166,88 +249,7 @@ SELECT
     i.fmcsa_stopped + i.otp_stopped AS identity_risks_stopped,
     t.median_seconds_to_first_offer,
     o.onboarding_leads,
-    -- the three rules, held at zero
     r.bookings_over_ceiling,
     r.otp_bypasses,
     0 AS ceiling_revelations  -- asserted by tests; never recorded, never leaked
 FROM north n, margins m, identity i, time_to_offer t, onboarding o, rules r;
-
--- ---------------------------------------------------------------------------
--- v_funnel: stage counts, with the drop between each stage.
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_funnel AS
-WITH stages AS (
-    SELECT
-        count(DISTINCT run_id) AS calls,
-        count(DISTINCT run_id) FILTER (
-            WHERE event_type = 'fmcsa_checked' AND (details->>'eligible')::boolean
-        ) AS fmcsa_ok,
-        count(DISTINCT run_id) FILTER (WHERE event_type = 'otp_verified') AS otp_ok,
-        count(DISTINCT run_id) FILTER (
-            WHERE event_type = 'search_performed' AND (details->>'results')::int > 0
-        ) AS load_found,
-        count(DISTINCT run_id) FILTER (
-            WHERE event_type = 'negotiation_closed' AND details->>'outcome' = 'accepted'
-        ) AS agreed,
-        count(DISTINCT run_id) FILTER (
-            WHERE event_type = 'booking_result' AND details->>'status' = 'booked'
-        ) AS booked
-    FROM call_events
-)
-SELECT
-    'calls' AS stage, calls AS count FROM stages
-UNION ALL SELECT 'fmcsa_ok', fmcsa_ok FROM stages
-UNION ALL SELECT 'otp_ok', otp_ok FROM stages
-UNION ALL SELECT 'load_found', load_found FROM stages
-UNION ALL SELECT 'agreed', agreed FROM stages
-UNION ALL SELECT 'booked', booked FROM stages;
-
--- ---------------------------------------------------------------------------
--- v_call_timeline: the events of one call in order, with a readable label.
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_call_timeline AS
-SELECT
-    run_id,
-    occurred_at,
-    event_type,
-    id,
-    details,
-    CASE event_type
-        WHEN 'fmcsa_checked' THEN
-            'FMCSA: ' || COALESCE(details->>'legal_name', mc_number, '') ||
-            CASE WHEN (details->>'eligible')::boolean
-                 THEN ' eligible'
-                 ELSE ' rejected (' || COALESCE(details->>'reason', '') || ')'
-            END
-        WHEN 'otp_sent' THEN
-            'OTP sent to ' || COALESCE(details->>'destination', '') ||
-            CASE WHEN (details->>'resend')::boolean THEN ' (resend)' ELSE '' END
-        WHEN 'otp_verified' THEN 'OTP verified'
-        WHEN 'otp_failed' THEN
-            'OTP failed (' || COALESCE(details->>'reason', '') || ', ' ||
-            COALESCE((details->>'attempts_left')::text, '') || ' left)'
-        WHEN 'search_performed' THEN
-            'Search: ' || COALESCE((details->>'results')::text, '0') || ' result(s)'
-        WHEN 'load_pitched' THEN 'Pitched ' || COALESCE(load_id, 'a load')
-        WHEN 'negotiation_opened' THEN
-            'Offer $' || COALESCE((details->>'opening_offer')::text, '')
-        WHEN 'negotiation_round' THEN
-            'Round ' || COALESCE((details->>'round')::text, '') || ': ' ||
-            COALESCE(details->>'action', '') ||
-            CASE WHEN details->>'carrier_ask' IS NOT NULL
-                 THEN ' ask $' || (details->>'carrier_ask') ELSE '' END ||
-            CASE WHEN details->>'offer' IS NOT NULL
-                 THEN ' -> $' || (details->>'offer') ELSE '' END
-        WHEN 'negotiation_closed' THEN
-            'Negotiation ' || COALESCE(details->>'outcome', '') ||
-            CASE WHEN details->>'agreed_rate' IS NOT NULL
-                 THEN ' at $' || (details->>'agreed_rate') ELSE '' END
-        WHEN 'booking_attempted' THEN
-            'Booking at $' || COALESCE((details->>'agreed_rate')::text, '')
-        WHEN 'booking_result' THEN 'Booking ' || COALESCE(details->>'status', '')
-        WHEN 'handoff_created' THEN 'Handoff: ' || COALESCE(details->>'reason', '')
-        WHEN 'lead_created' THEN 'Lead: ' || COALESCE(details->>'temperature', '')
-        ELSE event_type
-    END AS label
-FROM call_events
-ORDER BY run_id, occurred_at;
