@@ -175,6 +175,8 @@ class NegotiationEngine:
         session.add_negotiation(negotiation)
 
         # Events are internal, so the ceiling is allowed here and nowhere else.
+        # The load snapshot gives the dashboard a readable description of what
+        # was pitched; it never carries a rate.
         self._sink.emit(
             session.run_id,
             EventType.NEGOTIATION_OPENED,
@@ -184,6 +186,14 @@ class NegotiationEngine:
             ceiling=ceiling,
             opening_offer=offer,
             urgent=urgent,
+            origin=f"{load.orig_city}, {load.orig_state}",
+            destination=f"{load.dest_city}, {load.dest_state}",
+            equipment_type=load.eqtype,
+            miles=load.miles,
+            pickup_datetime=load.pickup_dt.isoformat() if load.pickup_dt else None,
+            delivery_datetime=load.delivery_dt.isoformat() if load.delivery_dt else None,
+            weight=load.weight,
+            commodity_type=load.commodity,
         )
 
         return NegotiationOffer(

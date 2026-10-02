@@ -60,20 +60,26 @@ SELECT
             'Search: ' || COALESCE((details->>'results')::text, '0') || ' result(s)'
         WHEN 'load_pitched' THEN 'Pitched ' || COALESCE(load_id, 'a load')
         WHEN 'negotiation_opened' THEN
-            'Offer $' || COALESCE((details->>'opening_offer')::text, '')
+            'Offer $' || to_char((details->>'opening_offer')::numeric, 'FM999,999,999')
         WHEN 'negotiation_round' THEN
-            'Round ' || COALESCE((details->>'round')::text, '') || ': ' ||
-            COALESCE(details->>'action', '') ||
-            CASE WHEN details->>'carrier_ask' IS NOT NULL
-                 THEN ' ask $' || (details->>'carrier_ask') ELSE '' END ||
-            CASE WHEN details->>'offer' IS NOT NULL
-                 THEN ' -> $' || (details->>'offer') ELSE '' END
+            'Round ' || COALESCE(details->>'round', '') || ': ' ||
+            CASE details->>'action'
+                WHEN 'clarify' THEN
+                    'asked to confirm the number' ||
+                    CASE WHEN details->>'carrier_ask' IS NOT NULL
+                         THEN ' (heard $' || to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') || ')'
+                         ELSE '' END
+                ELSE
+                    'carrier asked $' || to_char((details->>'carrier_ask')::numeric, 'FM999,999,999') ||
+                    ' · system countered $' || to_char((details->>'offer')::numeric, 'FM999,999,999')
+            END
         WHEN 'negotiation_closed' THEN
             'Negotiation ' || COALESCE(details->>'outcome', '') ||
             CASE WHEN details->>'agreed_rate' IS NOT NULL
-                 THEN ' at $' || (details->>'agreed_rate') ELSE '' END
+                 THEN ' at $' || to_char((details->>'agreed_rate')::numeric, 'FM999,999,999')
+                 ELSE '' END
         WHEN 'booking_attempted' THEN
-            'Booking at $' || COALESCE((details->>'agreed_rate')::text, '')
+            'Booking at $' || to_char((details->>'agreed_rate')::numeric, 'FM999,999,999')
         WHEN 'booking_result' THEN 'Booking ' || COALESCE(details->>'status', '')
         WHEN 'handoff_created' THEN 'Handoff: ' || COALESCE(details->>'reason', '')
         WHEN 'lead_created' THEN 'Lead: ' || COALESCE(details->>'temperature', '')
@@ -143,10 +149,15 @@ opened AS (
 closed AS (
     SELECT DISTINCT ON (run_id) run_id,
            (details->>'agreed_rate')::bigint AS agreed_rate,
-           details->>'outcome' AS outcome,
-           (details->>'rounds')::int AS rounds_used
+           details->>'outcome' AS outcome
     FROM call_events WHERE event_type = 'negotiation_closed'
     ORDER BY run_id, occurred_at
+),
+rounds AS (
+    SELECT run_id, count(*) AS rounds_used
+    FROM call_events
+    WHERE event_type = 'negotiation_round' AND details->>'action' = 'counter'
+    GROUP BY run_id
 ),
 booked AS (
     SELECT DISTINCT ON (run_id) run_id, details->>'status' AS booking_status
@@ -189,7 +200,7 @@ SELECT
     CASE WHEN (op.ceiling - op.opening_offer) > 0 THEN
         round(100.0 * (op.ceiling - cl.agreed_rate) / (op.ceiling - op.opening_offer), 1)
     END AS protected_margin_pct,
-    cl.rounds_used,
+    r.rounds_used,
     extract(epoch FROM (op.opened_at - b.started_at))::int AS seconds_to_first_offer,
     bk.booking_status
 FROM bounds b
@@ -197,6 +208,7 @@ LEFT JOIN fmcsa f  USING (run_id)
 LEFT JOIN otp o    USING (run_id)
 LEFT JOIN opened op USING (run_id)
 LEFT JOIN closed cl USING (run_id)
+LEFT JOIN rounds r  USING (run_id)
 LEFT JOIN booked bk USING (run_id)
 LEFT JOIN searched s USING (run_id)
 LEFT JOIN handed h   USING (run_id);
@@ -218,10 +230,14 @@ margins AS (
     FROM calls
 ),
 identity AS (
-    SELECT count(*) FILTER (WHERE event_type = 'fmcsa_checked' AND (details->>'eligible')::boolean IS FALSE)
-             AS fmcsa_stopped,
-           count(*) FILTER (WHERE event_type = 'otp_failed') AS otp_stopped
-    FROM call_events
+    SELECT
+        (SELECT count(DISTINCT run_id) FROM call_events
+          WHERE event_type = 'fmcsa_checked' AND (details->>'eligible')::boolean IS FALSE) AS fmcsa_stopped,
+        (SELECT count(*) FROM (
+            SELECT run_id FROM call_events WHERE event_type = 'otp_failed'
+            EXCEPT
+            SELECT run_id FROM call_events WHERE event_type = 'otp_verified'
+        ) s) AS otp_stopped
 ),
 time_to_offer AS (
     SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY seconds_to_first_offer)
