@@ -370,6 +370,7 @@ def test_a_failed_authority_lookup_does_not_change_the_verdict(reply, caplog):
 
     with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
         check = client.check("123456")
+        client.join_recon()  # the authority fetch runs on a background thread
 
     assert check.eligible
     assert check.authority_age_days is None
@@ -391,6 +392,7 @@ def test_the_authority_log_never_carries_the_web_key(caplog):
 
     with caplog.at_level(logging.WARNING, logger="app.fmcsa.client"):
         client.check("123456")
+        client.join_recon()  # the authority fetch runs on a background thread
 
     assert secret not in caplog.text
     assert "***" in caplog.text

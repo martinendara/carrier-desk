@@ -102,6 +102,43 @@ fresh token; the script answers all four open questions in one pass.
 
 Full output: `docs/smoke-2026-10-01.txt`.
 
+## Observed vs. manual (2026-10-03) — framing confirmed, auth still refused
+
+`scripts/tms_connectivity.py` re-probed the live server from the same machine with raw
+socket I/O, printing every response line with `repr()`. The token is still refused, but the
+probing settled **three framing questions that were open**, because a malformed frame gets a
+different error than a refused token — which proves the server parses before it authenticates.
+
+| Frame sent | Answer |
+|---|---|
+| `CMD:DEBUG_ECHO\|AUTH:<token>\|MSG:diag\r\n` | `ERR\|CODE:AUTH_FAILED\|MSG:Invalid or missing auth token` |
+| `CMD:DEBUG_ECHO\|MSG:diag\r\n` — **no AUTH field at all** | same `AUTH_FAILED` |
+| `CMD:NOT_A_REAL_COMMAND\|AUTH:<token>\|MSG:diag\r\n` | same `AUTH_FAILED` |
+| `CMD:DEBUG_ECHO\|AUTH:<wrong-token>\|MSG:diag\r\n` | same `AUTH_FAILED` |
+| `CMD:DEBUG_ECHO\|AUTH:<token>\n` — **LF, no CR** | **no bytes at all**, until the 5 s deadline |
+| `AUTH:<token>\|CMD:DEBUG_ECHO\r\n` — **AUTH before CMD** | **`ERR\|CODE:MALFORMED\|MSG:Malformed frame`** |
+
+**Confirmed.** `\r\n` is required — an LF-only frame gets no answer, so the server
+accumulates until it sees the CR. `CMD` must come first: putting `AUTH` first is rejected
+as `MALFORMED`, not as a bad token. Both were assumptions taken from the manual until now;
+`docs/tms-protocol.md` §Request is right as written.
+
+**Also observed.** Authentication is checked **before** the command is validated: an
+unknown command carrying a token answers `AUTH_FAILED`, never `UNKNOWN_CMD`. And "invalid"
+and "missing" are one case on the wire — a frame with no `AUTH` field and a frame with the
+wrong token are refused with the same sentence, so the message cannot be read as a
+statement about the token specifically.
+
+**Still refused.** Our token, and a deliberately wrong one, are indistinguishable from the
+outside. Either the credential is stale or the server accepts none at all; both are fixed by
+re-issuing it. The 2026-09-30 samples remain the only successful live exchange.
+
+**Untouched.** No `LOAD_BOOK` was sent, and the four open questions above
+(`MAX_RESULTS` ceiling, `PICKUP_DT`, `FLATBED`, today's padding) are **still unanswered** —
+they need a working token, which is exactly what the auth step blocks.
+
+Full output: `docs/tms-connectivity-2026-10-03.md`.
+
 ## Live samples (2026-09-30)
 ```
 CMD:DEBUG_ECHO|AUTH:<token>

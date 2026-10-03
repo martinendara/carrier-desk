@@ -1142,3 +1142,122 @@ it. *A fixed code accepted for any MC.* That would let a caller verify any carri
 
 **Why.** It is an evaluation tool, not a bypass: off by default, scoped to one MC, and the
 audit trail marks every reviewer code so a rep can tell it apart from a real one.
+
+---
+
+# Phase 5 — Twin signals, the drop outcome, and the seed
+
+---
+
+## 60. A call whose events stopped is `dropped`, not `in_progress`
+
+**Problem.** `v_calls` labelled every call with no terminal event `in_progress`, and there
+was no way out of it. The QA scenarios end deliberately, but so does a real carrier: they
+put the phone down mid-sentence, the platform ends the call, and the service — which never
+sees a hangup — simply stops receiving tool calls. That call would read `in_progress`
+forever, and a dashboard showing it would be showing a call that ended days ago.
+
+**Choice.** No terminal event **and** a last event older than 15 minutes is `dropped`, with
+`dropped_at_stage` naming the step it was in (`fmcsa`, `otp`, `search`, `negotiation`,
+`booking`). A call that ended in a `handoff_created` event is never `dropped`, whatever the
+handoff reason: a handoff is a deliberate end state, not a cut-off one.
+
+**Rejected.** *A staleness window of an hour or a day.* A voice call is minutes long; 15
+minutes is already an order of magnitude past any real one, and a shorter window would
+catch an unusually long negotiation as dropped. *Treating `requested` handoffs as
+`dropped`.* They are not.
+
+**Why.** The alternative is a status that means "we do not know", and a dashboard cannot
+act on that. Naming a stage makes the drop actionable: a `dropped_at_stage = 'booking'`
+call is a load that was agreed and never booked, which is a rep's problem this afternoon.
+
+**Known wart.** A call that ends with a `requested` handoff has no outcome of its own in
+the closed set, so it stays `in_progress` — permanently. Adding a `handed_off` outcome
+would fix it and is a one-line change, but it widens a closed vocabulary, so it waits for
+a decision rather than being slipped in.
+
+---
+
+## 61. `source` has exactly one definition
+
+**Problem.** `v_calls` computed `source` with an inline `CASE`. Every new view that has to
+expose `source` would have copied it, and the copies would have agreed until the first time
+one of them was edited.
+
+**Choice.** A `v_run_source` view — one row per run, `qa` / `review` / `live` — that
+`v_calls` and every Signal view read.
+
+**Rejected.** A SQL function (harder to inspect in a dashboard), and copying the `CASE`
+(a definition that drifts is worse than one that is inconvenient to reach).
+
+**Why.** The rule "a QA run is QA even when it reuses the reviewer MC" is subtle enough
+that two copies of it would eventually disagree, and the disagreement would look like a
+data problem rather than a definition problem.
+
+---
+
+## 62. `v_funnel` accounts for every call at every step, and closes by construction
+
+**Problem.** The old `v_funnel` was one column per stage, so it could show that a stage
+lost calls but not why. And its stages were computed independently of `v_calls.outcome`,
+which meant the two could describe the same call differently.
+
+**Choice.** Long format — one row per `(stage, bucket)` with
+`bucket ∈ entered | passed | exited | completed | in_flight` — with
+`entered = passed + completed + in_flight + Σ exited` holding at every stage. `v_calls`
+exposes `funnel_step` (0–5), the number of stages a call got through, and the funnel is
+derived from it: `entered(S) = |funnel_step >= S|`, `passed(S) = |funnel_step >= S+1|`,
+`exited(S) = |funnel_step = S with a reason|`.
+
+**Rejected.** *Recomputing each stage's counts from `call_events` inside `v_funnel`.* That
+is what the old view did, and it is how a call ends up `no_match` in one view and
+`load_found` in the other. *A wide table with a column per reason.* It needs a schema
+change every time an outcome is added, and it cannot express the closure check.
+
+**Why.** The identity holds because a call leaves the funnel at exactly one step and
+`funnel_step` is that step — there is no arithmetic to get wrong. It is verified on every
+run of the seed: all six stages balance against real events.
+
+---
+
+## 63. `v_calls.searched` is the best result count of the call, not the first search
+
+**Problem.** The `searched` CTE took the *first* `search_performed` of a call. A carrier
+who hears "nothing out of Hawaii", then asks about Illinois and is pitched three loads,
+would have that call labelled `no_match` — because the first attempt was empty.
+
+**Choice.** `max(results)` across the call's searches: `no_match` now means no search found
+anything.
+
+**Rejected.** *Leaving it.* It is a wrong label on a call that went on to negotiate, and it
+would have shown up as a `no_match` that nonetheless has a negotiation in the timeline.
+
+**Why.** The one definition had to change anyway so the outcome and `funnel_step` agree;
+fixing the bug was the cheaper half of the same edit.
+
+---
+
+## 64. The seed computes the fake ceiling from the fixture
+
+**Problem.** Producing a `negotiation_failed` whose gap is under 5% — the recoverable pile
+a rep should call back — needs an ask a hair above `MAX_BUY`. The ceiling is deliberately
+unobservable from outside: no response contains it and no response contains the gap, so the
+script cannot find it the way the agent cannot. Without it, the only closes the seed can
+produce are enormous ones, which is the opposite of what the view is for.
+
+**Choice.** The seed reads the posted `RATE` from the same fixture file the deployment
+serves (`--fixtures`, default `tests/fixtures/tms_demo.txt`) and applies the fake server's
+own formula — the same three lines as `app/tms/fake_server.py::_fake_max_buy`, which a check
+asserts agrees for all 20 demo loads. It also refuses to use the one load whose `LOAD_GET`
+was recorded for real, because that load's `MAX_BUY` is the fixture's own number and the
+formula would be wrong by exactly the margin this step cannot afford.
+
+**Rejected.** *Binary-searching the ceiling with probe calls.* It costs several OTP
+verifications per lane against a rate limit, and it finds the ceiling the same way — only
+more expensively. *Reading the ceiling out of a response.* It is not there, and making it
+be there is the one thing the whole design refuses to do.
+
+**Why.** The script is the operator's tool, not the agent: it already knows the host and the
+API key, and it computes a number it never sends. The only thing that goes over the wire is
+an ask — a number the carrier could have said out loud. The step fails loudly, naming the
+fixture mismatch, if the close does not happen.

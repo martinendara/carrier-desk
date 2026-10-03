@@ -68,17 +68,55 @@ For a fresh session to resume without re-deriving anything. Read this, then
 
 ## Twin schema + views (`twin/schema.sql`, re-runnable)
 
-- `call_events` (one row per event) + views `v_calls`, `v_kpi_overview`,
-  `v_funnel`, `v_call_timeline`.
-- `v_calls` exposes `source`: `qa` if `run_id LIKE 'qa-%'`, else `review` if any
-  event of the call carries `details.reviewer = true` (the evaluation MC 15735),
-  else `live`; and `rounds_used` = count of `negotiation_round` with
-  `action <> 'clarify'`.
+Applied twice over live data with no error; every view is dropped and recreated
+by the file, so re-pasting it is the update path.
+
+- `call_events` (one row per event) + `v_run_source`, `v_calls`, `v_funnel`,
+  `v_kpi_overview`, `v_call_timeline`, and the Signals/rep-queue set below.
+- **`source` is defined once**, in `v_run_source`: `qa` if `run_id LIKE 'qa-%'`,
+  else `review` if any event of the call carries `details.reviewer = true`, else
+  `live`. Every view that exposes `source` reads it from there.
+- `v_calls` exposes `outcome`, `last_stage` (the last step of the call reached:
+  `fmcsa` / `otp` / `search` / `negotiation` / `booking`), `dropped_at_stage`
+  (that stage, but only when `outcome = 'dropped'`) and `funnel_step` (0–5, how
+  many funnel stages the call got through).
+- **`dropped`** = no terminal event and the last event is older than 15 minutes.
+  The service never sees a hangup, so a call whose events stopped is a call that
+  was cut off, not one still running. A call that ended in a `handoff_created`
+  is never `dropped`, whatever the reason.
+- `v_funnel` is long format — one row per `(stage, bucket)` with
+  `bucket ∈ entered | passed | exited | completed | in_flight` — and
+  `entered = passed + completed + in_flight + Σ exited` holds at every stage
+  (verified in Postgres 16). `bucket = 'exited'` carries the reason, including
+  `dropped_<stage>`.
+- Signals: `v_signal_unserved_demand`, `v_signal_price_check`,
+  `v_signal_recoverable`; pricing: `v_rate_per_mile`; queue:
+  `v_rep_queue`, `v_onboarding_leads`. All expose `source`.
 - Time metrics (`median_seconds_to_first_offer`) are computed **only** on
   `source = 'live'`; the other KPIs use everything.
 - `negotiation_opened.details` carries a load snapshot: `origin`, `destination`,
   `equipment_type`, `miles`, `pickup_datetime`, `delivery_datetime`, `weight`,
-  `commodity_type` (no rate).
+  `commodity_type`, `posted_rate` (no ceiling for the agent, but the ceiling is
+  in the event).
+
+### Two gaps the Signals views expose
+
+The seed run in `scripts/qa_run.py --seed` produces data for all of them, but
+two fields the views would rather have are not emitted:
+
+1. **`load_pitched`** is written only by `GET /loads/{load_id}`, a route the
+   platform no longer calls (DECISIONS §56 moved the detail into the search
+   response). So `v_signal_price_check.pitches` is 0 for every load. Minimal
+   change: emit `LOAD_PITCHED` per load in `/loads/search`, where the shown
+   loads are already recorded.
+2. **`lead_created`** is defined in CLAUDE.md §9 and never emitted:
+   `/otp/send` writes nothing on the `routed_onboarding` path, and
+   `app/onboarding/qualification.py::qualify` has no caller outside the tests.
+   `v_onboarding_leads` therefore builds on `handoff_created` with
+   `reason = 'onboarding'`, and its `temperature` / `lead_reason` /
+   `authority_age_days` columns are NULL. Minimal change: call `qualify()` in
+   `/otp/send` when the dispatch is `routed_onboarding` and emit `lead_created`
+   with its result.
 
 ## Reviewer mode (evaluation only)
 
@@ -87,12 +125,6 @@ For a fresh session to resume without re-deriving anything. Read this, then
 - For that MC: fixed code, no email, `otp_sent` event flagged `reviewer=true`,
   fixed `say` ("…Please read me the six digits."). Nothing the caller says
   enables it.
-
-## DIAG — pending removal
-
-`app/main.py` `_diag_middleware` (+ registration) and the `DIAG auth …` log in
-`app/security.py` are **temporary**. Remove them once QA is signed off. They log
-`run_id`/path/key-presence, never the key.
 
 ## Render env vars (names only — values are in the dashboard, never the repo)
 
@@ -130,6 +162,23 @@ Mechanics:
   'qa-%'`.
 - Report: `docs/qa-report.md` — PASS/FAIL per scenario + `v_kpi_overview` KPIs +
   the 3 rules at 0.
+
+## Seed mode (`scripts/qa_run.py --seed`)
+
+Creates the demo data the Signals views need, driving the real HTTP surface:
+4 unserved lanes, the same load closed twice, 3 closes within 5% of the ceiling,
+3 bookings at 3 ladder depths, 1 onboarding lead. Run ids are
+`qa-seed-<token>-<name>` (timestamp token, so re-runs never collide).
+
+- **Costs ~12 OTP verifications, all on one MC** — the reviewer MC. Only that MC
+  can open the gate unattended: FMCSA is a live lookup, the contact must be in
+  `app/carriers/directory.py`, and the code must be readable by the script.
+- **One MC is a hard limit of the environment, not the script.** MC 000000 is used
+  for the onboarding step precisely because it is *not* in the directory.
+- Needs `--fixtures` (default `tests/fixtures/tms_demo.txt`) to match the
+  deployment's `TMS_FAKE_FIXTURES`: the near-miss closes need the ceiling, which
+  is computed from the posted rate. See DECISIONS §64.
+- Cleanup: `DELETE FROM call_events WHERE run_id LIKE 'qa-seed-%';`
 
 ## QA run — done (2026-10-02)
 

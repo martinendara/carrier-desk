@@ -42,12 +42,14 @@ def build_api_key_dependency(expected_key: str) -> Callable[..., None]:
             )
 
         if x_api_key is None or not hmac.compare_digest(x_api_key, expected_key):
-            # Deliberately vague: whether the header was missing or wrong is not
-            # something an unauthenticated caller needs to know.
+            # Deliberately vague in the response: whether the header was missing
+            # or wrong is not something an unauthenticated caller needs to know.
+            # The log is more specific, because "the platform stopped sending a
+            # key" and "someone is guessing" want different reactions.
             logger.warning(
-                "DIAG auth 401 on %s: %s",
+                "rejected an unauthenticated request on %s: %s",
                 request.url.path,
-                "missing" if x_api_key is None else "mismatch",
+                "no X-API-Key header" if x_api_key is None else "wrong X-API-Key",
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

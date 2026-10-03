@@ -7,8 +7,6 @@ strip it, and nothing in it can forget to.
 
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, Depends, Query
 
 from app.api import phrasing
@@ -21,7 +19,6 @@ from app.deadline import Deadline
 from app.events import EventType
 from app.results import ResultCode
 
-logger = logging.getLogger(__name__)
 router = APIRouter(tags=["loads"])
 
 #: The brief caps a pitch at three loads. Fixing it here rather than exposing it
@@ -57,17 +54,6 @@ def search_loads(
     # so search alone carries delivery_dt, weight, commodity, pieces, dims and
     # notes. rate and MAX_BUY are stripped by public_dict().
     loads = [container.tms.get_load(load.load_id, deadline=deadline) for load in summaries]
-
-    logger.warning(
-        "DIAG search equipment=%r origin=%r/%r destination=%r/%r filters=%r results=%d",
-        payload.equipment,
-        payload.orig_city,
-        payload.orig_state,
-        payload.dest_city,
-        payload.dest_state,
-        filters,
-        len(loads),
-    )
 
     # Recorded before the response is built: what the carrier was shown is what
     # this call may later negotiate, and it is decided here and nowhere else.

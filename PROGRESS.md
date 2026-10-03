@@ -686,3 +686,154 @@ mode): **22/22 passed**. Full suite: **554 passed**.
    `TMS_FAKE_FIXTURES=tests/fixtures/tms_demo.txt`.
 3. Paste `twin/schema.sql` into Twin (the `source` column and live-only time metric are in
    it), and clean prior `qa-%` rows before the run.
+
+---
+
+## Architecture review, Twin signals, and a seed mode (2026-10-03)
+
+**Status:** all three complete and verified. Nothing pushed; the deploy still runs the
+previous build.
+
+### 1. `docs/ARCHITECTURE_REVIEW.md` (read-only)
+
+An audit of everything the service keeps in memory or on local disk, and what each failure
+does to a live call: two instances, a redeploy mid-call, Twin down, the TMS slow or down,
+FMCSA down. Capacity against ~500 loads/week with Monday-AM and Friday-PM peaks. Twelve
+ranked risks with severity, PoC relevance and a phase-2 fix.
+
+Three findings worth acting on before anything else, all free:
+
+1. **`/health` is a synchronous handler** (`app/main.py`), so it shares the 40-thread pool
+   with every TMS call. A TMS stall can starve the healthcheck and get a working service
+   restarted — which loses every in-flight call.
+2. **The event log is not durable on the current deploy.** `EVENTS_JSONL_PATH` points inside
+   the container and there is no `render.yaml` and no mounted volume, so the JSONL that
+   `docs/DEPLOY.md` calls "the durable record" dies with the instance.
+3. **Nothing reaps expired sessions or handoff tickets.** `purge_expired` has no caller in
+   `app/`; the handoff queue only ever appends, and each ticket holds a ceiling.
+
+Conclusion on capacity: one instance has roughly two orders of magnitude of headroom at
+this volume. The binding constraint is restarts and cold starts, not throughput.
+
+### 2. Twin views (`twin/schema.sql`)
+
+Six new views, all exposing `source`, all re-runnable:
+`v_signal_unserved_demand`, `v_signal_price_check`, `v_signal_recoverable`,
+`v_rate_per_mile`, `v_rep_queue`, `v_onboarding_leads`. Plus `v_run_source` (one definition
+of `qa`/`review`/`live`, now read by `v_calls` too), the `dropped` outcome and
+`dropped_at_stage` in `v_calls`, and a rewritten `v_funnel` that explains every drop.
+
+**Verified on Postgres 16.15**, not by inspection: the file was applied twice over live
+data with no error, and `entered = passed + completed + in_flight + Σ exited` was asserted
+at all six funnel stages. Two bugs surfaced only because of that:
+
+- `v_rep_queue` joined its lane CTE on `load_id` when the CTE was `DISTINCT ON (run_id)`,
+  which fanned every row out across every other call that touched the same load.
+- `v_calls.searched` read the first search rather than the best, so a call that looked at
+  Hawaii and then booked out of Illinois would have read `no_match` (DECISIONS §63).
+
+**Two fields the views want and the events do not carry** (both reported, neither changed —
+they need a code change and a redeploy, and the user asked to be told first):
+
+1. `load_pitched` is emitted only by `GET /loads/{load_id}`, which the platform no longer
+   calls, so `v_signal_price_check.pitches` is 0 for every load. Minimal fix: emit it per
+   shown load in `/loads/search`, where the loads are already recorded.
+2. `lead_created` is never emitted at all, and `app/onboarding/qualification.py::qualify`
+   has no caller outside the tests. `v_onboarding_leads` therefore builds on
+   `handoff_created` with `reason = 'onboarding'`. Minimal fix: call `qualify()` in
+   `/otp/send` on the `routed_onboarding` path and emit `lead_created`.
+
+### 3. Seed mode (`scripts/qa_run.py --seed`)
+
+Five steps creating four unserved lanes, the same load closed twice, three closes within 5%
+of the ceiling, three bookings at three different depths of the ladder, and an onboarding
+lead. Every run id is `qa-seed-<token>-<name>` with a timestamp token, so a re-run never
+collides with the previous one's session.
+
+Verified end to end against a local instance with the demo fixture and a stubbed FMCSA
+(FMCSA blocks Argentina, so a real lookup here fails closed): **5/5 steps pass**, the 96
+events they produce load into Postgres, and all six views come back populated. The QA
+scenarios still pass **22/22** in the same session, so the refactor of the registry did not
+regress them.
+
+Two assumptions are checked rather than assumed: the seed's ceiling formula is asserted
+equal to `_fake_max_buy` for all 20 demo loads, and each lane's filters are asserted to
+isolate exactly the intended load.
+
+### 4. Live TMS connectivity diagnostic
+
+`scripts/tms_connectivity.py` (new) re-probed the real server from the local machine with
+raw socket I/O. **The token is still refused** — same `AUTH_FAILED` as 2026-10-01, same
+~165 ms round trip — but the probing settled three framing questions that were open,
+because a malformed frame gets a *different* error than a refused token:
+
+| Frame | Answer |
+|---|---|
+| well-formed, real token | `ERR\|CODE:AUTH_FAILED\|MSG:Invalid or missing auth token` |
+| well-formed, **no AUTH field** | same `AUTH_FAILED` |
+| well-formed, unknown command | same `AUTH_FAILED` |
+| well-formed, **wrong token** | same `AUTH_FAILED` |
+| **LF terminator, no CR** | **no bytes at all** (5 s deadline) |
+| **AUTH before CMD** | **`ERR\|CODE:MALFORMED\|MSG:Malformed frame`** |
+
+Confirmed on the wire: **`\r\n` is required**, and **`CMD` must come first** — putting
+`AUTH` first is rejected as `MALFORMED`, which proves the server parses the frame before it
+authenticates. Authentication also runs *before* command validation. "Invalid" and
+"missing" are one case, so the message cannot be read as a statement about this token
+specifically; a stale credential and a server that accepts none look identical from
+outside, and both are fixed by re-issuing it.
+
+Recorded in `docs/tms-protocol.md` and `docs/tms-connectivity-2026-10-03.md`.
+**No `LOAD_BOOK` was sent**, and the four open protocol questions are still unanswered —
+they need a working token. `tests/test_connectivity_guard.py` (15 tests) pins the
+read-only allowlist and the masking.
+
+### 5. A flaky test, found and fixed
+
+`tests/test_fmcsa.py` had two tests that asserted on `caplog.text` without waiting for the
+background authority fetch — `check()` fires it on a daemon thread by design and returns
+immediately. Roughly one run in ten, the log line had not been emitted yet and
+`caplog.text` was empty. Pre-existing (reproduced on clean `HEAD`), and fixed by adding
+`client.join_recon()`, which `FmcsaClient` already documents as "used by tests" and which
+a third test in the same file was already calling.
+
+Ten consecutive full runs since: **569 passed, ten times out of ten.**
+
+### Tests
+
+```
+569 passed
+```
+
+(No new coverage for the views or the seed — the suite does not run the scripts. Both were
+verified by running them, which is recorded above. `test_connectivity_guard.py` adds 15 for
+the diagnostic's safety properties.)
+
+### DIAG removed
+
+`_diag_middleware` and its registration (`app/main.py`), the `DIAG search` line
+(`app/api/routes/loads.py`) and the `DIAG auth` label (`app/security.py`) are gone. The 401
+log line stays — it is a security signal — reworded to say which of the two it was without
+the DIAG marker.
+
+### Open issues
+
+1. **`requested` handoffs stay `in_progress` forever.** They have no outcome of their own in
+   the closed result-code set, and a handoff is a terminal event, so they are neither
+   `dropped` nor finished. Adding a `handed_off` outcome would fix it; that widens a closed
+   vocabulary and waits for a decision.
+2. **A dashboard that reads `v_funnel` needs updating.** The shape changed from one row per
+   stage to one row per `(stage, bucket)`.
+3. **The seed needs ~12 OTP verifications on one MC** (all on the reviewer MC). See below.
+4. Everything the architecture review lists, in particular R4 (`/health`), R3 (durable
+   events) and R6 (no reaper) — all free, none done yet.
+
+### Before the seed run (operator checkpoint)
+
+- `OTP_VERIFY_RATE_LIMIT_PER_HOUR` is **100** right now: comfortable. The seed spends **12**
+  verifications on MC 15735 and the 22 QA scenarios spend ~19 more, so both in one hour is
+  ~31. At the planned permanent value of **20**, one seed run fits and the QA scenarios
+  would already 429 — the two cannot share an hour at 20.
+- The deploy must be at a commit whose `TMS_FAKE_FIXTURES` points at `tms_demo.txt`, because
+  the seed's ceiling arithmetic is derived from that file and from nothing else.
+- Clear a previous seed with `DELETE FROM call_events WHERE run_id LIKE 'qa-seed-%';`.
