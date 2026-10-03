@@ -564,18 +564,42 @@ opens AS (
     WHERE event_type = 'negotiation_opened' AND load_id IS NOT NULL
     GROUP BY load_id
 ),
+-- Every close, one row each, with the question "is this a price or a probe?"
+-- already answered. Split out from the aggregate below so the test is written
+-- once instead of repeated in three FILTER clauses.
+closed_rounds AS (
+    SELECT
+        load_id,
+        occurred_at,
+        (details->>'gap')::numeric     AS gap,
+        (details->>'ceiling')::numeric AS ceiling,
+        -- Plausible = the carrier asked for at most twice what we could pay.
+        -- Beyond that it is not a negotiating position: it is a deliberately
+        -- absurd number (the adversarial suite closes a load by asking
+        -- 999,997 against a 1,250 ceiling), or a misheard one. NULL on either
+        -- side is not plausible, so it stays out of the averages too.
+        (details->>'gap')::numeric
+            <= (details->>'ceiling')::numeric AS plausible
+    FROM call_events
+    WHERE event_type = 'negotiation_closed'
+      AND details->>'outcome' = 'closed'
+      AND load_id IS NOT NULL
+),
 closes AS (
     SELECT
         load_id,
-        count(*) FILTER (WHERE details->>'outcome' = 'closed') AS failed_negotiations,
-        avg((details->>'gap')::numeric)
-            FILTER (WHERE details->>'outcome' = 'closed') AS avg_gap_usd,
-        avg((details->>'gap')::numeric
-            / NULLIF((details->>'ceiling')::numeric, 0))
-            FILTER (WHERE details->>'outcome' = 'closed') AS avg_gap_ratio,
-        max(occurred_at) FILTER (WHERE details->>'outcome' = 'closed') AS last_closed
-    FROM call_events
-    WHERE event_type = 'negotiation_closed' AND load_id IS NOT NULL
+        -- Counts every close, plausible or not: the call did fail either way,
+        -- and a load we cannot sell is a load we cannot sell.
+        count(*) AS failed_negotiations,
+        -- The averages ignore the probes. Averaging one in is what reported an
+        -- average gap of $333,049 — and 26,643% — against a $1,250 ceiling,
+        -- because two real $200 misses were drowned by a single 800x ask.
+        -- A load whose closes are all probes gets NULL here, which the App
+        -- renders as an em dash: "no price signal", which is the truth.
+        avg(gap) FILTER (WHERE plausible) AS avg_gap_usd,
+        avg(gap / NULLIF(ceiling, 0)) FILTER (WHERE plausible) AS avg_gap_ratio,
+        max(occurred_at) AS last_closed
+    FROM closed_rounds
     GROUP BY load_id
 ),
 pitches AS (
