@@ -57,6 +57,21 @@ SAYS = {
 #: not by failing to agree on them.
 FAILED_NEGOTIATION_PATH = ("OFFER_CLOSE", "NEGOTIATION_CLOSED", "NO_NEGOTIATION")
 
+#: The words the prompt forbids the agent to say. `higher` is the one that was
+#: missing, and it is the one that matters most: a carrier who hears "I can't go
+#: any higher" has learned that a higher number exists, which is the whole fact
+#: the design hides. None of these names the ceiling, and every one of them
+#: confirms one.
+FORBIDDEN_CEILING_WORDS = (
+    "maximum",
+    "max",
+    "ceiling",
+    "budget",
+    "limit",
+    "higher",
+    "the most we can pay",
+)
+
 
 # --- a close must not hint at a ceiling ---------------------------------
 
@@ -178,6 +193,48 @@ def test_the_person_request_cannot_fire_after_the_call_ends():
     line = next(l for l in prompt.splitlines() if l.startswith("If they ask for a person"))
 
     assert "before the call has ended" in line
+
+
+# --- the prompt: the guardrail word list --------------------------------
+
+
+def _guardrail_line(prompt: str) -> str:
+    return next(
+        line for line in prompt.splitlines() if line.startswith("Never use these words:")
+    )
+
+
+@pytest.mark.parametrize("word", FORBIDDEN_CEILING_WORDS)
+def test_the_prompt_forbids_every_word_that_hints_at_a_ceiling(word):
+    line = _guardrail_line(_prompt()).lower()
+
+    assert word in line, (
+        f"{word!r} is not on the prompt's forbidden list. It does not name the "
+        "ceiling, but a carrier who hears it learns there is a number above the "
+        "one they were offered — and that is enough to keep pushing."
+    )
+
+
+def test_the_forbidden_words_are_a_list_and_not_a_stray_mention():
+    """A word appearing somewhere on the line is not the same as being forbidden.
+
+    The line ends with "Never hint that there is a higher number", which
+    contains "higher" — so this checks the list itself, before the first
+    sentence ends, rather than the whole line.
+    """
+    listed = _guardrail_line(_prompt()).lower().split("never use these words:", 1)[1]
+    listed = listed.split(".", 1)[0]
+
+    for word in FORBIDDEN_CEILING_WORDS:
+        assert word in listed, f"{word!r} is on the line but not in the list"
+
+
+def test_the_guardrail_forbids_the_implication_and_not_only_the_words():
+    """The word list is the floor, not the rule. An agent can hint without any of
+    them, and the guardrail has to say so."""
+    line = _guardrail_line(_prompt()).lower()
+
+    assert "never hint that there is a higher number" in line
 
 
 # --- the prompt: the MC length ------------------------------------------
