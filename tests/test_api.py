@@ -597,6 +597,26 @@ def test_search_with_no_matches_says_so(api):
     assert body["result_code"] == "no_match"
 
 
+def test_a_no_match_line_does_not_promise_a_callback_it_will_not_make(api):
+    """The agent speaks this and hangs up in the same turn, so it cannot offer
+    to take details. It used to — "Let me take your details" — and the hangup
+    the prompt asks for contradicted the line the carrier had just heard.
+    """
+    client, _ = api
+    become_verified(client, "run-1")
+
+    say = search(client, "run-1", equipment="FLATBED")["say"]
+
+    assert say == (
+        "I don't have anything matching that right now. "
+        "I've noted your lane, and we'll reach out if something opens up."
+    )
+    assert "details" not in say.lower()
+    # Nothing that asks the carrier for one more thing, because nothing follows.
+    for invitation in ("?", "let me take", "what's your", "could you give"):
+        assert invitation not in say.lower()
+
+
 def test_search_without_filters_is_a_speakable_error(api):
     client, _ = api
     become_verified(client, "run-1")

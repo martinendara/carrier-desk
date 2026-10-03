@@ -66,7 +66,16 @@ OTP_EXPIRED = "That code has expired. I'll send you a new one."
 
 # --- loads --------------------------------------------------------------
 
-NO_MATCH = "I don't have anything matching that right now. Let me take your details."
+#: An empty search ends the call — the agent speaks this and hangs up in the same
+#: turn. It used to promise "let me take your details", which the agent then had
+#: to honour, and the hangup it was told to do contradicted that. This says what
+#: actually happens instead: the lane is recorded (the search event carries the
+#: filters) and nobody is strung along waiting for a callback that was never
+#: going to come from this call.
+NO_MATCH = (
+    "I don't have anything matching that right now. "
+    "I've noted your lane, and we'll reach out if something opens up."
+)
 LOADS_FOUND = "I've got {count} load{s} that could work."
 
 # --- negotiation --------------------------------------------------------
