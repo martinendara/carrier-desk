@@ -5,9 +5,22 @@ For a fresh session to resume without re-deriving anything. Read this, then
 
 ## Repo state
 
-- Branch `main`. Tests: **596 passed**; GitHub Actions **green**.
+- Branch `main`. Tests: **604 passed**; GitHub Actions **green**.
 - Commit: the commit this file ships in (`git rev-parse --short HEAD`).
 - `python -m pytest` is the whole suite; it needs no `.env` (fake TMS + mocked FMCSA).
+- **Deployed and live: `802679f`** on `https://carrier-desk.onrender.com`, `ENV=development`,
+  `TMS_MODE=fake`, `TMS_FAKE_FAULT_RATE=0.10`, `OTP_VERIFY_RATE_LIMIT_PER_HOUR=100`.
+- **The deploy's `X-API-Key` is the value in `.env` named `RENDER_API_KEY`.** The name is
+  misleading: that key does **not** work against `api.render.com` (it answers 401 there). It
+  is the service's own key, and it is what `scripts/qa_run.py` wants as `QA_API_KEY`.
+
+## The documents written this round
+
+| File | What it is |
+|---|---|
+| `docs/ARCHITECTURE_REVIEW.md` | Read-only audit: every piece of in-memory and on-disk state, what each failure does to a call, capacity, and twelve ranked risks |
+| `docs/APP_SPEC_TANDA2.md` | **Self-contained** spec for the Sandbox builder (no repo access): the four signals, the rep queue, the overview card, dropped call records, empty states, exact view and column names |
+| `docs/tms-connectivity-2026-10-03.md` | Raw evidence of the live TMS probe, token masked |
 
 ## Architecture (15 lines)
 
@@ -115,6 +128,13 @@ by the file, so re-pasting it is the update path.
 ## Reviewer mode (evaluation only)
 
 - `REVIEWER_MODE` (default false) + `REVIEWER_MC` + `REVIEWER_OTP`.
+- **Fenced (2026-10-03).** `ENV=production` refuses to start with `REVIEWER_MODE` on —
+  it is a fixed code for one known MC with no email, which in a deployment is a
+  verification bypass. Checked **in every environment**, not only production: the
+  deploy runs as `development` on purpose, so a production-only rule would not
+  protect the instance that has it switched on. Requires a non-empty `REVIEWER_MC`
+  and a `REVIEWER_OTP` of exactly six digits — an empty one would be accepted as
+  the correct code, as-is.
 - **MC 15735 (ALLIED VAN LINES INC)** — verified eligible. `107012` also works.
 - For that MC: fixed code, no email, `otp_sent` event flagged `reviewer=true`,
   fixed `say` ("…Please read me the six digits."). Nothing the caller says
@@ -199,6 +219,53 @@ Creates the demo data the Signals views need, driving the real HTTP surface:
   deployment's `TMS_FAKE_FIXTURES`: the near-miss closes need the ceiling, which
   is computed from the posted rate. See DECISIONS §64.
 - Cleanup: `DELETE FROM call_events WHERE run_id LIKE 'qa-seed-%';`
+
+## Seed run against production — done (2026-10-03)
+
+`scripts/qa_run.py --seed --token live03` against the live deploy: **5/5 steps passed in 21 s**.
+The deploy was live on `802679f` first, verified from `/health`.
+
+One booking settled as `booked_unconfirmed` — `TMS_FAKE_FAULT_RATE=0.10` produced a lost
+answer on `LD10004`, the recovery could not read the load back, and the carrier was told a rep
+would confirm. That is the fault injection and the booking invariant working together, live.
+
+### Rows the seed left, per view
+
+| View | Total rows | Of which from this seed |
+|---|---|---|
+| `v_signal_unserved_demand` | 5 | 4 (`CA→NY`, `OR→WA`, `NV→UT`, `MA→PA`) |
+| `v_signal_price_check` | 1 | 1 (`LD10010`) |
+| `v_signal_recoverable` | 3 | 3 (`LD10001`, `LD10013`, `LD10015`) |
+| `v_rate_per_mile` | 8 | 3 lanes (`Atlanta→Miami`, `Denver→Kansas City`, `Seattle→Portland`) |
+| `v_rep_queue` | 10 | 3 (2 `booked`, 1 `booking_pending`) |
+| `v_onboarding_leads` | 1 | 1 (MC 000000) |
+
+The rows the seed did not create were already in Twin from the 2026-10-02 QA run
+(`HI` in unserved demand; four more lanes and seven more rep-queue rows) and from the
+evaluator's `review` call. **Nothing is double-counted**: the seed's run ids carry the
+`live03` token, so `run_id LIKE 'qa-seed-live03-%'` separates them exactly.
+
+`v_signal_price_check` is one row and not three because the threshold is per load: a lane that
+was opened once, pitched once and lost once does not meet "≥2 failed / ≥3 opened / ≥3 pitched".
+The near-miss lanes are in `v_signal_recoverable`, which is where they belong.
+
+### OTP the run spent
+
+**12 verifications on MC 15735**, 12 sends, across 13 runs — measured from Twin
+(`count(*) FILTER (WHERE event_type = 'otp_verified')`), not estimated. The onboarding run is
+the thirteenth: it verifies FMCSA but no code is issued, so it costs no verification. At the
+permanent limit of 20/hour this is one seed run per hour; at 100 there is room for eight.
+
+### Twin has a read route
+
+`GET https://platform.happyrobot.ai/api/v2/twin/tables/call_events?limit=200&offset=0` with the
+same Bearer key returns `{tableName, kind, rows, total}` — paginated by `limit`/`offset`, 50 rows
+by default. `/twin/tables/{table}/rows` is write-only and answers 404 to a GET; the correct read
+path has no `/rows` suffix.
+
+It is how the counts above were taken: fetch every row, load it into a local Postgres with
+`twin/schema.sql`, and read the views. Worth keeping — it is the only way to check a view's
+numbers from outside the dashboard.
 
 ## QA run — done (2026-10-02)
 
