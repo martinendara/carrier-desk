@@ -963,6 +963,9 @@ def test_a_tms_fault_becomes_a_speakable_error(api):
     assert response.status_code == 502
     body = response.json()
     assert body["error"] == "tms_unavailable"
+    assert body["say"] == (
+        "I'm having trouble reaching our load board. Let me get someone to call you."
+    )
     # Nothing internal in what the agent gets.
     text = json.dumps(body)
     for leak in ("SERVER_ERROR", "LOAD_QUERY", "AUTH", "127.0.0.1", "Traceback", "tms."):
@@ -1005,7 +1008,13 @@ def test_a_slow_tms_is_cut_off_by_the_budget():
         )
 
     assert response.status_code == 504
-    assert response.json()["error"] == "tms_timeout"
+    body = response.json()
+    assert body["error"] == "tms_timeout"
+    # What the carrier actually hears. A 504 is the one failure here the
+    # platform can usefully retry, but a carrier on the phone cannot be told
+    # that — they get a sentence, and it has to be one that offers a next step.
+    assert body["say"] == "Our load board is slow to answer. Let me have someone call you back."
+    assert "504" not in body["say"] and "timeout" not in body["say"].lower()
 
 
 # --- events -------------------------------------------------------------
@@ -1717,3 +1726,64 @@ def test_this_services_loggers_are_enabled_for_info(api):
     client, _ = api
 
     assert logging.getLogger("app.tms.client").isEnabledFor(logging.INFO)
+
+
+# --- reviewer mode is a tool, and it is fenced ---------------------------
+
+
+def test_reviewer_mode_is_refused_in_production():
+    """The same shape of mistake as the fake TMS, and a verification bypass.
+
+    Reviewer mode issues a fixed code, with no email, for one known MC. Anyone
+    who reads the code becomes that carrier — so it belongs to an evaluation,
+    never to a deployment with carriers on the line.
+    """
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        api_app(
+            env="production", tms_mode="live", tms_host="tms.test", tms_port=1,
+            tms_token="x", service_api_key=API_KEY, resend_api_key="r",
+            otp_hmac_secret=SECRET, reviewer_mode=True, reviewer_mc="15735",
+            reviewer_otp="123456",
+        ).__enter__()
+
+    assert "REVIEWER_MODE" in str(caught.value)
+    assert "15735" in str(caught.value)
+
+
+def test_reviewer_mode_without_an_mc_is_refused():
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        api_app(reviewer_mode=True, reviewer_otp="123456").__enter__()
+
+    assert "REVIEWER_MC" in str(caught.value)
+
+
+@pytest.mark.parametrize("otp", ["", "   ", "12345", "1234567", "abcdef"])
+def test_reviewer_mode_without_a_six_digit_code_is_refused(otp):
+    """An empty REVIEWER_OTP would be accepted as the correct code, as-is.
+
+    That is a verification bypass with no secret in it, one unset env var away,
+    and it is the reason this is checked in every environment rather than only
+    in production — the deploy runs as development.
+    """
+    from app.container import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as caught:
+        api_app(reviewer_mode=True, reviewer_mc="15735", reviewer_otp=otp).__enter__()
+
+    assert "REVIEWER_OTP" in str(caught.value)
+
+
+def test_a_well_formed_reviewer_mode_still_starts():
+    with api_app(reviewer_mode=True, reviewer_mc="15735", reviewer_otp="123456") as (client, _):
+        verify = client.post(
+            "/carriers/verify", json={"run_id": "r", "mc_number": "15735"}, headers=HEADERS
+        )
+        sent = client.post("/otp/send", json={"run_id": "r"}, headers=HEADERS).json()
+
+    assert verify.status_code == 200
+    assert sent["status"] == "sent"
+    assert sent["masked_destination"] is None  # no email in reviewer mode

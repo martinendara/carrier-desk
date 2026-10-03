@@ -54,6 +54,20 @@ def _enforce_production_guards(settings: Settings) -> None:
             "ENV=production. Set TMS_MODE=live, or unset ENV."
         )
 
+    if settings.reviewer_mode:
+        # Ranked second because it is the same shape of mistake as the fake TMS:
+        # both are switches that are right for an evaluation and wrong for a
+        # carrier. This one is a verification bypass — a fixed code, no email,
+        # for one known MC — so anyone who reads the code can become that
+        # carrier. The empty-secret checks below only make the service fail;
+        # this one makes it succeed at the wrong thing, which is worse.
+        raise ConfigurationError(
+            "REVIEWER_MODE is on and ENV=production. It issues a fixed OTP for "
+            f"MC {settings.reviewer_mc or '<unset>'} with no email, which is an "
+            "evaluation tool and not a production credential. Turn it off, or "
+            "unset ENV."
+        )
+
     if not settings.service_api_key.get_secret_value():
         # Left to fail at request time it would answer 503 to every tool, which
         # from the platform's side is indistinguishable from an outage.
@@ -75,6 +89,40 @@ def _enforce_production_guards(settings: Settings) -> None:
         raise ConfigurationError(
             "RESEND_API_KEY is empty and ENV=production. The OTP email could "
             "not be sent. Set it to the key for Resend's HTTP API."
+        )
+
+
+def _validate_reviewer_mode(settings: Settings) -> None:
+    """Refuse a reviewer mode that cannot be told apart from a bypass.
+
+    Checked in **every** environment, not just production: the deploy runs
+    `ENV=development` and uses reviewer mode on purpose, so a rule that only
+    applied to production would not protect the instance that actually has it
+    switched on.
+
+    The empty-code case is the one that matters. `reviewer_otp` defaults to the
+    empty string, and the service issues whatever it is given as the fixed code
+    — so `REVIEWER_MODE=true` with `REVIEWER_OTP` unset would accept an empty
+    string as the correct code for the reviewer MC. That is a verification
+    bypass with no secret in it at all, and it is one careless env var away.
+    """
+    if not settings.reviewer_mode:
+        return
+
+    if not settings.reviewer_mc.strip():
+        raise ConfigurationError(
+            "REVIEWER_MODE is on but REVIEWER_MC is empty. There is no carrier "
+            "to issue the fixed code to. Set REVIEWER_MC, or turn REVIEWER_MODE off."
+        )
+
+    otp = settings.reviewer_otp.get_secret_value().strip()
+    if len(otp) != 6 or not otp.isdigit():
+        # The carrier reads a six-digit code back, so anything else is either a
+        # typo or a weaker secret than the flow assumes.
+        raise ConfigurationError(
+            "REVIEWER_MODE is on but REVIEWER_OTP is not six digits. It is the "
+            "code the reviewer MC is issued, and an empty one would be accepted "
+            "as-is. Set it to six digits, or turn REVIEWER_MODE off."
         )
 
 
@@ -116,6 +164,7 @@ class Container:
     @classmethod
     def build(cls, settings: Settings) -> "Container":
         _enforce_production_guards(settings)
+        _validate_reviewer_mode(settings)
 
         store = RunSessionStore(ttl_seconds=settings.run_session_ttl_seconds)
         sink = build_event_sink(settings)
