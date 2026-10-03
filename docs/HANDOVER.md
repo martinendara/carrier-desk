@@ -9,12 +9,12 @@ code changes are planned; treat everything below as the end state.
 ## Repo state
 
 - Branch `main`. Tests: **678 passed**; GitHub Actions **green**.
-- **Deployed and live: `e3db5e6`** on `https://carrier-desk.onrender.com` —
-  `e3db5e6b7922eca6dcb828f71310e74819936342`, read from `/health` after the deploy went
+- **Deployed and live: `237a314`** on `https://carrier-desk.onrender.com` —
+  `237a314bd2362d731e838ca146c73b175ee7cfc0`, read from `/health` after the deploy went
   Live. `ENV=development`, `TMS_MODE=fake`, `TMS_FAKE_FAULT_RATE=0.10`,
   `OTP_VERIFY_RATE_LIMIT_PER_HOUR=100`.
-  *The commit that carries this document is one ahead and docs-only; the running code is
-  identical to `e3db5e6`.*
+  *Documentation commits move this hash without changing behaviour. The last commit that
+  touched code was `a624efc`; everything after it is docs and tests.*
 - `python -m pytest` is the whole suite; it needs no `.env` (fake TMS + mocked FMCSA).
 - **The deploy's `X-API-Key` is the value in `.env` named `RENDER_API_KEY`.** The name is
   misleading: that key does **not** work against `api.render.com` (it answers 401 there). It
@@ -24,34 +24,64 @@ code changes are planned; treat everything below as the end state.
 
 | | |
 |---|---|
-| Service | Deployed on Render, **Live on `e3db5e6`**, verified from `/health` |
+| Service | Deployed on Render, **Live on `237a314`**, verified from `/health` |
 | Voice workflow | **Published**, running the prompt in `docs/prompt-live.md` verbatim |
-| Adversarial tests (platform) | **6/6** — run at 10:07, after two rounds of prompt corrections |
+| Adversarial tests (platform) | **6/6** — the 10:07 run, after two rounds of corrections |
 | App | **v2 published** — built against `docs/APP_SPEC_TANDA2.md` |
 | Tests | **678 passed**, three consecutive runs |
 | Twin | `twin/schema.sql` pasted, all views live |
 
-The corrections the adversarial runs produced, in the order they surfaced. Only the first
-two are behind the 5/6 → 6/6 jump; the rest came from re-running the suite against a
-workflow that was already passing.
+### The adversarial runs, in order
 
-1. **The close ended the call twice** (ADV-5). The close `say` does not sound like a
-   goodbye, so `Ending` took its "otherwise, say one short goodbye" branch and added a
-   second farewell; and the "ask for a person" rule, unbounded, fired a handoff after the
-   close it was sitting next to. A defined ending is now terminal whatever the `say` sounds
-   like, and the person rule is bounded to before the call ends.
+| Time | Score | What it was |
+|---|---|---|
+| 8:21 | 5/6 | **Invalid.** `@mc_number` stayed plain text in the actor prompts, so no test got past asking for the MC. The score measured the harness, not the agent |
+| 9:08 | 3/6 | Real. The close hinted at a ceiling and promised a human follow-up; the pitch read out too many numbers |
+| 9:30 | — | Ceiling and style corrected. Surfaced a new failure: the offer repeated when the carrier gave no amount |
+| 10:07 | 6/6 | |
+
+**The 8:21 result is recorded here because it is the trap.** A green-adjacent score from a
+harness that never reached the behaviour under test reads exactly like a near-miss, and it
+sent the first round of work at two defects nobody had actually observed on a call. Before
+trusting a failing run, check that the run reached the thing it was scoring.
+
+### The corrections
+
+The first two were made before the harness was found broken — they are fixes to defects read
+in the prompt and a transcript, not to anything a scored run demonstrated. The last three
+came from the runs above.
+
+1. **The close ended the call twice.** The close `say` does not sound like a goodbye, so
+   `Ending` took its "otherwise, say one short goodbye" branch and added a second farewell;
+   and the "ask for a person" rule, unbounded, fired a handoff after the close it was
+   sitting next to. A defined ending is now terminal whatever the `say` sounds like, and the
+   person rule is bounded to before the call ends.
 2. **The agent invented a six-digit MC.** The claim was in the transcription context
    ("MC numbers (6 to 7 digits)"), not in the prompt. Fixed there, and the prompt's two
    six-digit examples became a neutral five-digit one. The service never required six: its
    validation is `^\d{1,8}$`, so `15735` always passed.
-3. **The close revealed a ceiling and promised a rep.** "I can't go higher than that"
+3. **The close revealed a ceiling and promised a rep** (9:08). "I can't go higher than that"
    confirms an upper bound exists without naming it, and nobody follows up on a walk-away.
    Rewritten, and every other agent-facing string audited for the same two faults.
-4. **The pitch read out numbers to someone driving.** It now leads with route, pickup and
-   equipment, then the offer; weight, miles and dimensions are answered only if asked.
-5. **A carrier who pushed without naming a price heard the offer repeated** until the call
-   ran out of turns. The agent now asks once, converts a relative figure to a total, and
-   knows that asking costs no round.
+4. **The pitch read out numbers to someone driving** (9:08). It now leads with route, pickup
+   and equipment, then the offer; weight, miles and dimensions are answered only if asked.
+5. **A carrier who pushed without naming a price heard the offer repeated** (9:30) until the
+   call ran out of turns. The agent now asks once, converts a relative figure to a total,
+   and knows that asking costs no round.
+
+### The Northstar criterion was narrowed to match
+
+The platform's "Brief and conversational" criterion said **one number per turn**. It was
+changed to **one price per turn**, because the old wording did not describe the rule it was
+meant to protect and could not be satisfied alongside the flow.
+
+A turn legitimately contains several numbers that are not prices: the pickup day, the pickup
+time, and the MC read back digit by digit. The agent is *required* to read the MC back. Under
+the old wording a compliant call could fail the criterion, and the pitch — the turn that
+actually had too much in it — was not the one the wording pointed at. What the rule was
+protecting is that the agent never stacks prices: the carrier's number is confirmed on its
+own, and the offer is spoken on its own. Narrowed to prices, it is judgeable and it points
+at the turn that was wrong.
 
 Frozen means frozen: the remaining items at the bottom of this file are known and
 deliberate, not unfinished.
