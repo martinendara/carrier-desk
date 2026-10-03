@@ -138,7 +138,15 @@ def spoken_amount(n: int) -> str:
 OFFER_OPEN = "I can offer {amount} on that load."
 OFFER_ACCEPT = "Great, we're agreed at {amount}."
 OFFER_COUNTER = "I can go up to {amount}."
-OFFER_CLOSE = "I can't go higher than that on this one. Let me have someone follow up."
+#: The end of a failed negotiation. Two things it must not do: hint that a
+#: ceiling exists ("I can't go higher" says there is a number we are refusing to
+#: reach, which is the one thing the whole design hides), and promise a human.
+#: A rep does not follow up on a walk-away — the call is over, and the carrier
+#: should hear that plainly rather than wait for a callback that is not coming.
+OFFER_CLOSE = (
+    "Looks like we're too far apart on this one. "
+    "Thanks for your time, and call us back anytime."
+)
 ASK_CLARIFY = "Sorry, I want to make sure I heard you right. What rate are you asking for?"
 
 # --- booking and handoff ------------------------------------------------
