@@ -1,18 +1,60 @@
 # HANDOVER — carrier-desk
 
 For a fresh session to resume without re-deriving anything. Read this, then
-`git log --oneline -3`, then pick up from **"Next: the QA run"** below.
+`git log --oneline -3`.
+
+**Frozen as of 2026-10-03.** The build is complete, published and verified. No further
+code changes are planned; treat everything below as the end state.
 
 ## Repo state
 
-- Branch `main`. Tests: **604 passed**; GitHub Actions **green**.
-- Commit: the commit this file ships in (`git rev-parse --short HEAD`).
+- Branch `main`. Tests: **678 passed**; GitHub Actions **green**.
+- **Deployed and live: `e3db5e6`** on `https://carrier-desk.onrender.com` —
+  `e3db5e6b7922eca6dcb828f71310e74819936342`, read from `/health` after the deploy went
+  Live. `ENV=development`, `TMS_MODE=fake`, `TMS_FAKE_FAULT_RATE=0.10`,
+  `OTP_VERIFY_RATE_LIMIT_PER_HOUR=100`.
+  *The commit that carries this document is one ahead and docs-only; the running code is
+  identical to `e3db5e6`.*
 - `python -m pytest` is the whole suite; it needs no `.env` (fake TMS + mocked FMCSA).
-- **Deployed and live: `802679f`** on `https://carrier-desk.onrender.com`, `ENV=development`,
-  `TMS_MODE=fake`, `TMS_FAKE_FAULT_RATE=0.10`, `OTP_VERIFY_RATE_LIMIT_PER_HOUR=100`.
 - **The deploy's `X-API-Key` is the value in `.env` named `RENDER_API_KEY`.** The name is
   misleading: that key does **not** work against `api.render.com` (it answers 401 there). It
   is the service's own key, and it is what `scripts/qa_run.py` wants as `QA_API_KEY`.
+
+## Final state (2026-10-03)
+
+| | |
+|---|---|
+| Service | Deployed on Render, **Live on `e3db5e6`**, verified from `/health` |
+| Voice workflow | **Published**, running the prompt in `docs/prompt-live.md` verbatim |
+| Adversarial tests (platform) | **6/6** — run at 10:07, after two rounds of prompt corrections |
+| App | **v2 published** — built against `docs/APP_SPEC_TANDA2.md` |
+| Tests | **678 passed**, three consecutive runs |
+| Twin | `twin/schema.sql` pasted, all views live |
+
+The corrections the adversarial runs produced, in the order they surfaced. Only the first
+two are behind the 5/6 → 6/6 jump; the rest came from re-running the suite against a
+workflow that was already passing.
+
+1. **The close ended the call twice** (ADV-5). The close `say` does not sound like a
+   goodbye, so `Ending` took its "otherwise, say one short goodbye" branch and added a
+   second farewell; and the "ask for a person" rule, unbounded, fired a handoff after the
+   close it was sitting next to. A defined ending is now terminal whatever the `say` sounds
+   like, and the person rule is bounded to before the call ends.
+2. **The agent invented a six-digit MC.** The claim was in the transcription context
+   ("MC numbers (6 to 7 digits)"), not in the prompt. Fixed there, and the prompt's two
+   six-digit examples became a neutral five-digit one. The service never required six: its
+   validation is `^\d{1,8}$`, so `15735` always passed.
+3. **The close revealed a ceiling and promised a rep.** "I can't go higher than that"
+   confirms an upper bound exists without naming it, and nobody follows up on a walk-away.
+   Rewritten, and every other agent-facing string audited for the same two faults.
+4. **The pitch read out numbers to someone driving.** It now leads with route, pickup and
+   equipment, then the offer; weight, miles and dimensions are answered only if asked.
+5. **A carrier who pushed without naming a price heard the offer repeated** until the call
+   ran out of turns. The agent now asks once, converts a relative figure to a total, and
+   knows that asking costs no round.
+
+Frozen means frozen: the remaining items at the bottom of this file are known and
+deliberate, not unfinished.
 
 ## The documents written this round
 
@@ -21,6 +63,8 @@ For a fresh session to resume without re-deriving anything. Read this, then
 | `docs/ARCHITECTURE_REVIEW.md` | Read-only audit: every piece of in-memory and on-disk state, what each failure does to a call, capacity, and twelve ranked risks |
 | `docs/APP_SPEC_TANDA2.md` | **Self-contained** spec for the Sandbox builder (no repo access): the four signals, the rep queue, the overview card, dropped call records, empty states, exact view and column names |
 | `docs/tms-connectivity-2026-10-03.md` | Raw evidence of the live TMS probe, token masked |
+| `docs/prompt-live.md` | **Source of truth for the Prompt node.** Paste it whole |
+| `docs/transcription-context.md` | The corrected agent voice transcription context, ready to paste |
 
 ## Architecture (15 lines)
 
