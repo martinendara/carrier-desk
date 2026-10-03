@@ -21,7 +21,7 @@ from helpers import FakeMailer
 from app.config import Settings
 from app.fmcsa import FmcsaClient
 from app.main import create_app
-from app.tms.fake_server import BOOK_ALREADY, PARTIAL, TIMEOUT
+from app.tms.fake_server import BOOK_ALREADY, MALFORMED, PARTIAL, TIMEOUT
 
 API_KEY = "test-api-key"
 SECRET = "test-secret-that-is-long-enough!!"
@@ -1021,7 +1021,14 @@ def test_a_full_call_is_recorded_in_the_event_log(api):
 
     recorded = [event.type for event in container.sink.for_run("run-1")]
 
-    assert recorded == [
+    # One `load_pitched` per load the search returned, so how many there are is
+    # the fixture's business and not this test's. They are pulled out of the
+    # sequence and checked for placement instead of counted, so everything else
+    # stays pinned exactly.
+    pitched_at = [i for i, t in enumerate(recorded) if t is EventType.LOAD_PITCHED]
+    rest = [t for t in recorded if t is not EventType.LOAD_PITCHED]
+
+    assert rest == [
         EventType.FMCSA_CHECKED,
         EventType.OTP_SENT,
         EventType.OTP_VERIFIED,
@@ -1033,6 +1040,11 @@ def test_a_full_call_is_recorded_in_the_event_log(api):
         EventType.BOOKING_RESULT,
         EventType.HANDOFF_CREATED,
     ]
+    # Every pitch sits between the search that produced it and the negotiation
+    # that followed, which is the order a rep reads the call in.
+    search_at = recorded.index(EventType.SEARCH_PERFORMED)
+    assert pitched_at, "a search that returned loads must record them as pitched"
+    assert all(search_at < i < search_at + len(pitched_at) + 1 for i in pitched_at)
 
 
 def test_the_event_log_holds_the_ceiling_the_agent_never_sees(api):
@@ -1515,3 +1527,193 @@ def test_search_treats_anywhere_as_no_destination(api):
     body = search(client, "run-1", equipment="DRY_VAN", dest_city="anywhere")
 
     assert body["count"] == 3
+
+
+# --- the events the Twin signals read ------------------------------------
+
+
+def test_every_shown_load_is_recorded_as_pitched(api):
+    """`load_pitched` comes from the search, because the search IS the pitch.
+
+    It used to come only from `GET /loads/{load_id}`, a route the platform no
+    longer calls, which left every load's pitch count at zero in Twin.
+    """
+    from app.events import EventType
+
+    client, container = api
+    become_verified(client, "run-1")
+    found = search(client, "run-1", equipment="DRY_VAN")
+
+    pitched = [event.payload["load_id"] for event in container.sink.of_type(EventType.LOAD_PITCHED)]
+
+    assert pitched == [load["load_id"] for load in found["loads"]]
+    assert pitched, "the search returned loads, so something must have been pitched"
+
+
+def test_a_search_that_finds_nothing_pitches_nothing(api):
+    from app.events import EventType
+
+    client, container = api
+    become_verified(client, "run-1")
+    result = search(client, "run-1", equipment="REEFER", orig_state="HI")
+
+    assert result["count"] == 0
+    assert container.sink.of_type(EventType.LOAD_PITCHED) == []
+
+
+def test_a_carrier_with_no_contact_is_recorded_as_a_lead(api):
+    """The onboarding path is the only place a lead is created."""
+    from app.events import EventType
+
+    client, container = api
+    verify_carrier(client, "run-1", UNKNOWN_MC)
+    client.post("/otp/send", json={"run_id": "run-1"}, headers=HEADERS)
+
+    leads = container.sink.of_type(EventType.LEAD_CREATED)
+
+    assert len(leads) == 1
+    payload = leads[0].payload
+    assert payload["mc_number"] == UNKNOWN_MC
+    assert payload["matching_loads"] == 0
+    # Unknown authority age is `Review`, and the reason says which rule fired.
+    assert payload["temperature"] == "review"
+    assert payload["reason"] == "authority_age_unknown"
+
+
+def test_a_carrier_that_gets_a_code_is_not_a_lead(api):
+    from app.events import EventType
+
+    client, container = api
+    become_verified(client, "run-1")
+
+    assert container.sink.of_type(EventType.LEAD_CREATED) == []
+
+
+# --- the booking invariant under a failing TMS ---------------------------
+
+
+def test_a_booking_that_cannot_be_confirmed_is_never_reported_as_booked(api):
+    """Every TMS call in the booking fails, and the carrier is not told `booked`.
+
+    LOAD_BOOK itself, and then the whole LOAD_GET recovery — three attempts of
+    it — so there is no evidence at all about what happened to the load. The
+    answer is `booking_pending` with no reference. The one thing it must never
+    be is a confirmed booking we could not read back.
+    """
+    from app.events import EventType
+
+    client, container = api
+    _agree_a_rate(client)
+
+    # The booking step and only the booking step: LOAD_BOOK, then the three
+    # recovery attempts. MALFORMED rather than TIMEOUT so the test is not
+    # racing the request budget.
+    container.fake_tms.script = [MALFORMED] * 4
+
+    body = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+    assert body["status"] == "booked_unconfirmed"
+    assert body["result_code"] == "booking_pending"
+    assert body["booking_ref"] is None
+
+    result = container.sink.of_type(EventType.BOOKING_RESULT)[0]
+    assert result.payload["status"] == "booked_unconfirmed"
+    assert result.payload["booking_ref"] is None
+
+
+def test_the_booking_invariant_is_an_invariant_not_a_branch(api):
+    """No fault combination may produce `booked` without a reference.
+
+    Walked over every script the fake can produce for the booking step, because
+    the guarantee is about the shape of the answer, not about which branch ran.
+    """
+    client, container = api
+
+    for script in ([MALFORMED] * 4, [PARTIAL] * 4, [TIMEOUT, MALFORMED, MALFORMED, MALFORMED]):
+        container.store.drop("run-1")
+        container.sink.events.clear()
+        load_id, _ = _agree_a_rate(client)
+        container.fake_tms.script = list(script)
+
+        body = client.post("/bookings", json={"run_id": "run-1"}, headers=HEADERS).json()
+
+        assert body["status"] != "booked", f"{script} reported a booking we never saw"
+        assert body["booking_ref"] is None, f"{script} produced a reference from nowhere"
+
+
+# --- liveness survives a TMS stall ---------------------------------------
+
+
+def test_health_does_not_use_the_worker_threadpool(api):
+    """The probe must answer while the TMS is holding every worker thread.
+
+    A sync handler runs in the same bounded threadpool as the TMS calls. Under a
+    stall those fill with searches waiting on their deadline, the probe queues
+    behind them, and the host restarts a service that was only ever waiting —
+    which drops every call in flight. Pinned here because the fix is one word
+    and the bug is invisible until it is an outage.
+    """
+    import inspect
+
+    client, _ = api
+    route = next(route for route in client.app.routes if getattr(route, "path", "") == "/health")
+
+    assert inspect.iscoroutinefunction(route.endpoint), (
+        "/health must be `async def`: a sync handler shares the threadpool the "
+        "TMS calls fill, and a starved healthcheck restarts a healthy service."
+    )
+
+
+# --- the log the TMS retry metric is read from ---------------------------
+
+
+def test_a_tms_attempt_is_logged_at_a_level_that_is_emitted(api, caplog):
+    """`logger.info` is discarded outright when the effective level is WARNING.
+
+    That is the default with no logging configured, and uvicorn configures only
+    its own loggers — so the line saying a TMS call *succeeded* never existed in
+    production. Only the failures did, which makes a retry that worked look
+    exactly like a retry that never happened.
+    """
+    client, _ = api
+    become_verified(client, "run-1")
+
+    with caplog.at_level(logging.INFO, logger="app.tms.client"):
+        search(client, "run-1", equipment="DRY_VAN")
+
+    assert "attempt 1/3 ok" in caplog.text
+    assert "first attempt" in caplog.text
+
+
+def test_a_recovered_attempt_says_so(api, caplog):
+    """Both halves of a retry are named, so the count is readable from the log."""
+    client, container = api
+    become_verified(client, "run-1")
+    container.fake_tms.script = [MALFORMED]  # the LOAD_QUERY, and only it
+
+    with caplog.at_level(logging.INFO, logger="app.tms.client"):
+        search(client, "run-1", equipment="DRY_VAN")
+
+    assert "attempt 1/3 failed" in caplog.text
+    assert "retrying" in caplog.text
+    assert "attempt 2/3 ok" in caplog.text
+    assert "recovered after 1 failed attempt" in caplog.text
+
+
+def test_a_final_attempt_failure_says_there_is_no_retry_left(api, caplog):
+    client, container = api
+    become_verified(client, "run-1")
+    container.fake_tms.script = [MALFORMED] * 3
+
+    with caplog.at_level(logging.INFO, logger="app.tms.client"):
+        client.post("/loads/search", json={"run_id": "run-1", "equipment": "DRY_VAN"}, headers=HEADERS)
+
+    assert "attempt 3/3 failed" in caplog.text
+    assert "no further attempt" in caplog.text
+
+
+def test_this_services_loggers_are_enabled_for_info(api):
+    """The fix has to survive someone rebuilding the app."""
+    client, _ = api
+
+    assert logging.getLogger("app.tms.client").isEnabledFor(logging.INFO)

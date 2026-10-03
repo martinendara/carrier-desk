@@ -47,6 +47,10 @@ def verify_carrier(
     # later in the OTP step.
     session.mc_number = check.mc_number
     session.fmcsa_eligible = check.eligible
+    # Kept on the call so onboarding can qualify a lead without asking FMCSA
+    # again. `None` today for every carrier (DECISIONS §48), which is a value
+    # `qualify` reads as unknown and answers with `Review`.
+    session.authority_age_days = check.authority_age_days
 
     container.sink.emit(
         payload.run_id,

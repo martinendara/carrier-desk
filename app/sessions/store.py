@@ -25,6 +25,14 @@ DEFAULT_TTL_SECONDS = 3600
 #: ends up as a dictionary key and in every event payload.
 MAX_RUN_ID_LENGTH = 128
 
+#: Sweep expired entries once the store holds this many. Expiry is lazy, so a
+#: session nobody ever reads again would otherwise stay in the dictionary
+#: forever — at 500 calls/week that is tens of MB a year, growing with no
+#: ceiling. The sweep rides the write path instead of a timer: no background
+#: thread to start, stop, monitor or leak, and the cost is amortised to nothing
+#: because it runs once per this many calls.
+SWEEP_THRESHOLD = 500
+
 
 def validate_run_id(run_id: str) -> str:
     """Normalise and validate a platform-supplied run id."""
@@ -57,12 +65,14 @@ class RunSessionStore:
         *,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         clock: Callable[[], float] | None = None,
+        sweep_threshold: int = SWEEP_THRESHOLD,
     ) -> None:
         self._ttl = ttl_seconds
         self._entries: dict[str, _Entry] = {}
         self._lock = threading.Lock()
         # Monotonic in production: a wall-clock jump must not expire live calls.
         self._now = clock or time.monotonic
+        self._sweep_threshold = max(1, sweep_threshold)
 
     def get(self, run_id: str) -> RunSession | None:
         """The session, or None if it never existed or has expired."""
@@ -87,14 +97,19 @@ class RunSessionStore:
         """The session, starting one if this is the call's first tool."""
         key = validate_run_id(run_id)
         with self._lock:
+            now = self._now()
             entry = self._entries.get(key)
-            if entry is not None and entry.expires_at > self._now():
+            if entry is not None and entry.expires_at > now:
                 # Re-inserting extends the TTL: a call that is still talking
                 # should not age out from under itself.
-                entry.expires_at = self._now() + self._ttl
+                entry.expires_at = now + self._ttl
                 return entry.session
             session = RunSession(run_id=key)
-            self._entries[key] = _Entry(session=session, expires_at=self._now() + self._ttl)
+            self._entries[key] = _Entry(session=session, expires_at=now + self._ttl)
+            # A call is the only thing that adds an entry, so this runs once per
+            # `sweep_threshold` calls and keeps the dictionary bounded.
+            if len(self._entries) >= self._sweep_threshold:
+                self._purge_locked(now)
             return session
 
     def drop(self, run_id: str) -> None:
@@ -104,11 +119,20 @@ class RunSessionStore:
     def purge_expired(self) -> int:
         """Remove expired sessions. Returns how many went."""
         with self._lock:
-            now = self._now()
-            stale = [key for key, entry in self._entries.items() if entry.expires_at <= now]
-            for key in stale:
-                del self._entries[key]
-            return len(stale)
+            return self._purge_locked(self._now())
+
+    def _purge_locked(self, now: float) -> int:
+        """The sweep, for callers already holding the lock.
+
+        Separate from :meth:`purge_expired` because `get_or_create` sweeps while
+        it holds the lock, and a plain `threading.Lock` is not reentrant —
+        calling the public method there would deadlock the call that triggered
+        the sweep.
+        """
+        stale = [key for key, entry in self._entries.items() if entry.expires_at <= now]
+        for key in stale:
+            del self._entries[key]
+        return len(stale)
 
     def __len__(self) -> int:
         return len(self._entries)

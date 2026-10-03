@@ -273,8 +273,42 @@ class TmsClient:
         fields: Mapping[str, object],
         deadline: Deadline | None = None,
     ) -> BookResult:
-        """Decide the outcome of a LOAD_BOOK whose response we never saw."""
-        load = self.get_load(load_id, deadline=deadline)  # idempotent: normal retries
+        """Decide the outcome of a LOAD_BOOK whose response we never saw.
+
+        Every exit from here is `booked_unconfirmed`: we never saw a reference,
+        so we never claim one. Which of the three roads we took only changes how
+        much we know, not how confidently the answer is stated.
+        """
+        try:
+            # Idempotent, so this is the one place a fault gets the normal retry
+            # ladder rather than the careful single attempt a booking gets.
+            load = self.get_load(load_id, deadline=deadline)
+        except TmsInvalidInput:
+            # Our own malformed request, not an accident of the network. That is
+            # a bug to fix, not an outcome to hand a carrier.
+            raise
+        except TmsFault as exc:
+            # The recovery itself failed: we now know neither whether the load
+            # is booked nor whether it is still available. That used to raise,
+            # and the carrier heard an error line with no rep behind it.
+            #
+            # Reporting `booked_unconfirmed` is the better failure of the two.
+            # It says "a rep will confirm", which is exactly true, and it puts a
+            # ticket in front of a human — where an exception put nothing. What
+            # it must never do is claim a reference, and it does not: every exit
+            # from this method returns `booking_ref: None`.
+            #
+            # DECISIONS §11 chose the raise, on the grounds that
+            # `booked_unconfirmed` meant "this load left the board and we think
+            # it was us". Reversed deliberately: the load may well be ours, the
+            # carrier is mid-call, and a rep is the only one who can settle it.
+            logger.warning(
+                "LOAD_BOOK for %s was ambiguous and the LOAD_GET recovery failed "
+                "(%s); reporting booked_unconfirmed with no reference",
+                load_id,
+                self._describe(exc),
+            )
+            return self._unconfirmed(load_id, ambiguous=True)
 
         if not load.is_open:
             # The load left OPEN, and the only booking call in flight was ours.
@@ -385,14 +419,20 @@ class TmsClient:
                 out_of_time = wants_retry and budget is not None and not budget.allows(delay)
                 retrying = wants_retry and not out_of_time
 
+                # One line per attempt, always, and both lines carry the same
+                # four facts: command, which attempt of how many, the outcome,
+                # and how long it took. That is what makes "succeeded after N
+                # retries" countable from the log rather than guessed at --
+                # and the last word is spelled out on both sides so a reader
+                # (or a grep) never has to infer it from a missing suffix.
                 logger.warning(
-                    "tms %s attempt %d/%d %s in %.3fs%s",
+                    "tms %s attempt %d/%d failed: %s in %.3fs - %s",
                     command,
                     attempt,
                     attempts,
                     self._describe(fault),
                     time.monotonic() - started,
-                    " - retrying" if retrying else "",
+                    "retrying" if retrying else "no further attempt",
                 )
                 if out_of_time:
                     # Reported as a budget failure rather than the underlying
@@ -407,12 +447,15 @@ class TmsClient:
                 continue
 
             logger.info(
-                "tms %s attempt %d/%d ok: %d record(s) in %.3fs",
+                "tms %s attempt %d/%d ok: %d record(s) in %.3fs - %s",
                 command,
                 attempt,
                 attempts,
                 len(lines),
                 time.monotonic() - started,
+                f"recovered after {attempt - 1} failed attempt(s)"
+                if attempt > 1
+                else "first attempt",
             )
             return lines
 

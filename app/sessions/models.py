@@ -150,6 +150,11 @@ class RunSession(BaseModel):
     #: move it, an OTP verified for one MC would authorise another.
     mc_number: str | None = None
     fmcsa_eligible: bool | None = None
+    #: What FMCSA said about the authority's age, kept so a later step can
+    #: qualify the lead without a second lookup. **None for every carrier
+    #: today**: the record carries no authority date (DECISIONS §48), which is
+    #: why onboarding reads it as `Review`.
+    authority_age_days: int | None = None
 
     otp: OtpChallenge | None = None
 

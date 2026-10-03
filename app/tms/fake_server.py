@@ -31,6 +31,7 @@ works, the retry succeeds".
 from __future__ import annotations
 
 import os
+import random
 import re
 import socketserver
 import threading
@@ -38,6 +39,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,6 +62,30 @@ MODES = frozenset({NORMAL, TIMEOUT, PARTIAL, MALFORMED, DELAYED})
 BOOK_SUCCESS = "success"
 BOOK_ALREADY = "already_booked"
 BOOK_INVALID_RATE = "invalid_rate"
+
+#: Commands a randomly-injected fault may hit. DEBUG_ECHO is excluded on
+#: purpose: it exists to prove the encoder, and the manual scopes faults to the
+#: operational commands. A diagnostic that fails at random is not a diagnostic.
+FAULTABLE_COMMANDS = frozenset({"LOAD_QUERY", "LOAD_GET", "LOAD_BOOK"})
+
+#: Which faults a random injection picks between, and with what odds.
+#:
+#: Both are *recoverable* transport faults: the request reached the server, the
+#: answer did not come back whole, and a retry can still succeed within the
+#: request's time budget. That is the class the retry ladder and the
+#: ambiguous-booking recovery exist for, so it is the class worth simulating.
+#:
+#: `TIMEOUT` is deliberately absent. The client's read deadline is 5 s and its
+#: per-request budget is 8 s, so a genuine timeout burns most of the budget on
+#: one attempt and the retry never fits — every injected timeout would surface
+#: as a 504 rather than as a recovered retry. A demo that fails outright one
+#: time in ten shows nothing about the ladder; a truncated answer shows the
+#: ladder working, which is the point of the knob. `PARTIAL` is the closest
+#: recoverable analogue of "the server went quiet".
+#:
+#: A server error (`ERR|CODE:`) is also absent: that path is covered explicitly
+#: and deterministically, and a response is an answer rather than an accident.
+RANDOM_FAULT_MODES = (PARTIAL, MALFORMED)
 
 #: Filters the fake server understands. Anything else is silently discarded,
 #: exactly as the manual describes -- which is why a misspelled filter looks
@@ -174,6 +200,8 @@ class FakeTms:
         load_status: str | None = None,
         hold_seconds: float = 1.0,
         raw_response: bytes | None = None,
+        fault_rate: float = 0.0,
+        random_value: Callable[[], float] | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
     ) -> None:
@@ -182,6 +210,8 @@ class FakeTms:
         for entry in script or []:
             if entry not in MODES:
                 raise ValueError(f"unknown mode {entry!r} in script")
+        if not 0.0 <= fault_rate <= 1.0:
+            raise ValueError("fault_rate must be between 0 and 1")
 
         self.mode = mode
         self.script = list(script or [])
@@ -194,6 +224,13 @@ class FakeTms:
         self.load_status = load_status
         self.hold_seconds = hold_seconds
         self.raw_response = raw_response
+        #: Probability that an operational command is answered with a fault
+        #: instead of a payload. 0 means "only the script injects faults".
+        self.fault_rate = fault_rate
+        #: Injectable so a test can make the dice land where it wants.
+        self._random = random_value or random.random
+        #: Faults actually injected, for a test to assert the rate is live.
+        self.injected_faults: list[str] = []
         self.host = host
         self.port = port
 
@@ -254,7 +291,7 @@ class FakeTms:
         if self.error_code and (self.error_command is None or self.error_command == command):
             return Reply(payload=self._encode(self._error_frame(self.error_code)))
 
-        mode = self._next_mode()
+        mode = self._next_mode(command)
         body = self._body_for(command, fields, mode)
 
         if mode == TIMEOUT:
@@ -267,9 +304,19 @@ class FakeTms:
             return Reply(payload=self._encode(body), hold_after=self.hold_seconds)
         return Reply(payload=self._encode(body))
 
-    def _next_mode(self) -> str:
+    def _next_mode(self, command: str = "") -> str:
+        """The mode for the next request: scripted first, then the dice, then the default."""
         if self.script:
             return self.script.pop(0)
+        if (
+            self.fault_rate > 0
+            and self.mode == NORMAL
+            and command in FAULTABLE_COMMANDS
+            and self._random() < self.fault_rate
+        ):
+            mode = RANDOM_FAULT_MODES[0 if self._random() < 0.5 else 1]
+            self.injected_faults.append(mode)
+            return mode
         return self.mode
 
     def _body_for(self, command: str, fields: dict[str, str], mode: str) -> str:

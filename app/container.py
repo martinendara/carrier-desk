@@ -135,7 +135,19 @@ class Container:
             # The real client over a real socket, against a server in this
             # process: the deadline, framing and retry code all still run.
             logger.warning("TMS_MODE=fake: serving loads from the recorded fixtures")
-            fake = start_fake_tms()
+            if settings.tms_fake_fault_rate > 0:
+                # Said out loud because it changes what a demo proves: every
+                # TMS call has a real chance of failing, so the retry ladder and
+                # the ambiguous-booking recovery are exercised rather than
+                # assumed. Safe because LOAD_BOOK stays idempotent per call
+                # (app/api/routes/bookings.py) and an unresolved booking is
+                # never reported as `booked`.
+                logger.warning(
+                    "TMS_FAKE_FAULT_RATE=%.2f: the fake TMS will fail that share "
+                    "of operational requests on purpose",
+                    settings.tms_fake_fault_rate,
+                )
+            fake = start_fake_tms(fault_rate=settings.tms_fake_fault_rate)
             tms = TmsClient(
                 host="127.0.0.1",
                 port=fake.port,
@@ -183,7 +195,9 @@ class Container:
             fmcsa=FmcsaClient.from_settings(
                 settings, timeout=settings.fmcsa_timeout_seconds
             ),
-            handoffs=HandoffQueue(),
+            handoffs=HandoffQueue(
+                retention_seconds=settings.handoff_retention_seconds
+            ),
             otp_verify_limiter=SlidingWindowLimiter(
                 limit=settings.otp_verify_rate_limit_per_hour,
                 window_seconds=SECONDS_PER_HOUR,

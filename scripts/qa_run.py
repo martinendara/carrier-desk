@@ -190,6 +190,37 @@ def assert_json(response: httpx.Response, expected: int, context: str) -> dict:
     return response.json()
 
 
+def assert_booking_settled(book: dict, context: str) -> str:
+    """A booking ended in one of its two settled states, and claimed nothing else.
+
+    With `TMS_FAKE_FAULT_RATE` above zero — 0.10 on the deployment — a booking
+    whose response is lost settles as `booking_pending`, because the recovery
+    could not read the load's status back. That is a *correct* outcome of the
+    same ladder, not a failure of it, so an end-to-end script cannot demand
+    `booked` specifically: it does not control the fault rate.
+
+    What it can demand is the invariant that holds at any fault rate, and it is
+    the one that matters to a carrier:
+
+      * the status is one of the two settled states, never anything else;
+      * `booked` always carries a reference, and never comes from a response we
+        did not read;
+      * `booking_pending` never carries one.
+
+    The strict "a confirmed booking reports booked, with a reference" case is
+    pinned in pytest, where the fake's fault rate is a test parameter.
+    """
+    status = book.get("status")
+    assert status in ("booked", "booked_unconfirmed"), f"{context}: unexpected {book}"
+    if status == "booked":
+        assert book.get("booking_ref"), f"{context}: booked without a reference: {book}"
+        assert book.get("result_code") == "booked", f"{context}: {book}"
+    else:
+        assert book.get("booking_ref") is None, f"{context}: pending with a reference: {book}"
+        assert book.get("result_code") == "booking_pending", f"{context}: {book}"
+    return status
+
+
 def verify_and_otp(client: Client, run_id: str, mc: str, otp: str) -> None:
     """verify → send → verify OTP. Raises if the gate does not open."""
     verify = assert_json(client.verify(run_id, mc), 200, "verify")
@@ -236,9 +267,9 @@ def standard_book_first(client: Client, config: Config) -> str:
     acc = assert_json(client.counter("qa-book-first", offer), 200, "counter")
     assert acc["action"] == "accept" and acc["amount"] == offer, f"expected accept at {offer}, got {acc}"
     book = assert_json(client.book("qa-book-first"), 200, "book")
-    assert book["status"] == "booked" and book["result_code"] == "booked", f"expected booked, got {book}"
+    status = assert_booking_settled(book, "book at first offer")
     assert_json(client.handoff("qa-book-first", "booked"), 200, "handoff")
-    return f"booked at first offer ${offer}"
+    return f"{status} at first offer ${offer}"
 
 
 @scenario("standard-book-after-1-counter")
@@ -249,9 +280,9 @@ def standard_book_1_counter(client: Client, config: Config) -> str:
     acc = assert_json(client.counter("qa-book-1", c1["amount"]), 200, "counter 2")
     assert acc["action"] == "accept", f"expected accept, got {acc}"
     book = assert_json(client.book("qa-book-1"), 200, "book")
-    assert book["status"] == "booked", f"expected booked, got {book}"
+    status = assert_booking_settled(book, "book after 1 counter")
     assert_json(client.handoff("qa-book-1", "booked"), 200, "handoff")
-    return f"offer ${offer} → counter ${c1['amount']} → booked ${acc['amount']}"
+    return f"offer ${offer} → counter ${c1['amount']} → {status} ${acc['amount']}"
 
 
 @scenario("standard-book-after-2-counters")
@@ -264,9 +295,9 @@ def standard_book_2_counters(client: Client, config: Config) -> str:
     acc = assert_json(client.counter("qa-book-2", c2["amount"]), 200, "counter 3")
     assert acc["action"] == "accept", f"expected accept, got {acc}"
     book = assert_json(client.book("qa-book-2"), 200, "book")
-    assert book["status"] == "booked", f"expected booked, got {book}"
+    status = assert_booking_settled(book, "book after 2 counters")
     assert_json(client.handoff("qa-book-2", "booked"), 200, "handoff")
-    return f"offer ${offer} → ${c1['amount']} → ${c2['amount']} → booked ${acc['amount']}"
+    return f"offer ${offer} → ${c1['amount']} → ${c2['amount']} → {status} ${acc['amount']}"
 
 
 @scenario("standard-book-after-3-counters")
@@ -279,9 +310,9 @@ def standard_book_3_counters(client: Client, config: Config) -> str:
     acc = assert_json(client.counter("qa-book-3", c2["amount"] + 25), 200, "counter 3")
     assert acc["action"] == "accept", f"expected accept on round 3, got {acc}"
     book = assert_json(client.book("qa-book-3"), 200, "book")
-    assert book["status"] == "booked", f"expected booked, got {book}"
+    status = assert_booking_settled(book, "book after 3 counters")
     assert_json(client.handoff("qa-book-3", "booked"), 200, "handoff")
-    return f"round-3 accept at ${acc['amount']}"
+    return f"round-3 accept at ${acc['amount']} → {status}"
 
 
 @scenario("standard-urgent-pickup")
@@ -296,9 +327,9 @@ def standard_urgent(client: Client, config: Config) -> str:
     acc = assert_json(client.counter("qa-urgent", c1["amount"]), 200, "counter 2")
     assert acc["action"] == "accept", f"expected accept, got {acc}"
     book = assert_json(client.book("qa-urgent"), 200, "book")
-    assert book["status"] == "booked", f"expected booked, got {book}"
+    status = assert_booking_settled(book, "urgent booking")
     assert_json(client.handoff("qa-urgent", "booked"), 200, "handoff")
-    return f"urgent lane booked at ${acc['amount']}"
+    return f"urgent lane {status} at ${acc['amount']}"
 
 
 # --- edges ---------------------------------------------------------------
@@ -370,9 +401,9 @@ def edge_idem_book(client: Client, config: Config) -> str:
     assert_json(client.counter("qa-idem-book", offer), 200, "counter")
     first = assert_json(client.book("qa-idem-book"), 200, "book 1")
     second = assert_json(client.book("qa-idem-book"), 200, "book retry")
-    assert first["status"] == "booked", f"expected booked, got {first}"
-    assert first["booking_ref"] == second["booking_ref"], f"refs diverge: {first} vs {second}"
-    return f"retry returns the same booking_ref {first['booking_ref']}"
+    assert_booking_settled(first, "idempotent book")
+    assert first == second, f"the retry diverged: {first} vs {second}"
+    return f"retry returns the same answer (ref {first['booking_ref']})"
 
 
 # --- adversarial: server-side guards ------------------------------------
@@ -705,9 +736,14 @@ def seed_bookings(client: Client, config: Config) -> str:
         assert accepted["action"] == "accept", f"expected accept, got {accepted}"
 
         booked = assert_json(client.book(run_id), 200, "book")
-        assert booked["status"] == "booked", f"expected booked, got {booked}"
-        assert_json(client.handoff(run_id, "booked"), 200, "handoff")
-        made.append(f"{lane.load_id}@${accepted['amount']}(+{lane.counters})")
+        status = assert_booking_settled(booked, f"booking {lane.load_id}")
+        # Hand off with the reason the booking actually reached: a pending one
+        # belongs in the rep queue under its own reason, and `v_rep_queue` shows
+        # both. With TMS_FAKE_FAULT_RATE at 0.10 a lane lands pending now and
+        # then, which is exactly the data that view wants.
+        reason = "booked" if status == "booked" else "booking_pending"
+        assert_json(client.handoff(run_id, reason), 200, "handoff")
+        made.append(f"{lane.load_id}@${accepted['amount']}(+{lane.counters},{status})")
     return f"{len(made)} bookings: {', '.join(made)}"
 
 

@@ -20,6 +20,8 @@ from app.api.schemas import (
     OtpVerifyResponse,
 )
 from app.container import Container
+from app.events import EventType
+from app.onboarding import qualify
 from app.otp import DispatchStatus, OtpFailure, spoken_destination
 from app.results import ResultCode
 
@@ -32,6 +34,36 @@ _SAY_BY_STATUS = {
     DispatchStatus.LOCKED: phrasing.OTP_LOCKED,
     DispatchStatus.SEND_FAILED: phrasing.OTP_SEND_FAILED,
 }
+
+
+def _record_lead(container: Container, session, run_id: str) -> None:
+    """Qualify and record a carrier that has no contact on file.
+
+    This is the only place a lead is created, and it is the moment the service
+    learns the carrier cannot be verified: there is nothing to send a code to.
+
+    `matching_loads` is read off the call rather than assumed. It is always 0
+    here — search is gated behind the OTP that was never issued, so a carrier
+    on this path has been shown no loads — and that is the honest input to the
+    rule, not a placeholder. The authority age is `None` for every carrier
+    today (DECISIONS §48), so qualification currently answers `Review` twice
+    over. Both inputs are real values; neither is a stand-in for a number we
+    could not obtain.
+    """
+    qualification = qualify(
+        authority_age_days=session.authority_age_days,
+        matching_loads=len(session.shown_load_ids),
+    )
+    container.sink.emit(
+        run_id,
+        EventType.LEAD_CREATED,
+        mc_number=session.mc_number,
+        temperature=qualification.temperature.value,
+        reason=qualification.reason,
+        authority_age_days=qualification.authority_age_days,
+        matching_loads=qualification.matching_loads,
+        fmcsa_eligible=session.fmcsa_eligible,
+    )
 
 
 def _rate_limit_key(session, run_id: str) -> str:
@@ -68,6 +100,9 @@ def send_otp(
         )
 
     dispatch = container.otp.send(payload.run_id, session.mc_number)
+
+    if dispatch.status is DispatchStatus.ROUTED_ONBOARDING:
+        _record_lead(container, session, payload.run_id)
 
     if dispatch.status is DispatchStatus.SENT:
         if dispatch.reviewer:

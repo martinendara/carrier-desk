@@ -67,6 +67,20 @@ class Settings(BaseSettings):
     tms_max_attempts: int = 3
     #: Token presented to the in-process fake. Never a real credential.
     tms_fake_token: str = "fake-token"
+    #: Probability (0.0–1.0) that the fake TMS answers a request with a fault
+    #: instead of a payload, chosen at random between a timeout and a malformed
+    #: frame. 0 disables it, which is what the tests want and what the
+    #: deployment has run with so far. A demo set to 0.10 exercises the retry
+    #: ladder and the ambiguous-booking recovery for real — the paths that
+    #: otherwise only ever run against the fault-injecting test server.
+    #: `live` mode ignores it entirely: the real server is faulty on its own.
+    tms_fake_fault_rate: float = 0.0
+
+    @model_validator(mode="after")
+    def _check_fault_rate(self) -> "Settings":
+        if not 0.0 <= self.tms_fake_fault_rate <= 1.0:
+            raise ValueError("TMS_FAKE_FAULT_RATE must be between 0 and 1")
+        return self
 
     #: Wall-clock ceiling for one HTTP request, retries included. The platform's
     #: webhook timeout is undocumented, so we pick our own and stay under it.
@@ -115,6 +129,10 @@ class Settings(BaseSettings):
 
     # --- Sessions (phase 2) ---------------------------------------------
     run_session_ttl_seconds: int = 3600
+    #: How long a senior-rep ticket stays in the in-memory queue. The queue is a
+    #: placeholder: `handoff_created` is the record a rep works from, so this
+    #: only bounds how much of the (ceiling-bearing) in-memory copy is kept.
+    handoff_retention_seconds: int = 86400
 
     # --- Events (phase 3) -----------------------------------------------
     #: Where the JSONL event log is written. Relative paths resolve from the

@@ -69,6 +69,17 @@ def search_loads(
         results=len(loads),
     )
 
+    # One event per load actually put in front of the carrier. This is the
+    # pitch: the search response *is* what the agent reads out (DECISIONS §56
+    # moved the detail into it), so a load returned here is a load pitched.
+    # Before this, `load_pitched` came only from `GET /loads/{load_id}` — a
+    # route the platform no longer calls — which left the count at zero for
+    # every load in Twin.
+    for load in loads:
+        container.sink.emit(
+            payload.run_id, EventType.LOAD_PITCHED, load_id=load.load_id, rate=load.rate
+        )
+
     if not loads:
         return LoadSearchResponse(
             loads=[], count=0, result_code=ResultCode.NO_MATCH.value, say=phrasing.NO_MATCH

@@ -809,6 +809,106 @@ Ten consecutive full runs since: **569 passed, ten times out of ten.**
 verified by running them, which is recorded above. `test_connectivity_guard.py` adds 15 for
 the diagnostic's safety properties.)
 
+---
+
+## Follow-up: the missing events, a faulting fake, and the review's cheap fixes (2026-10-03)
+
+**Status:** all five items done except the multi-MC one, which is **not done** — see below.
+Nothing pushed until the operator says so.
+
+### 1. The two events the Signal views were missing
+
+- **`load_pitched`** is now emitted once per load returned by `/loads/search`. It came only
+  from `GET /loads/{load_id}`, which the platform stopped calling, so `pitches` was 0 for
+  every load (DECISIONS §65).
+- **`lead_created`** is now emitted by `/otp/send` on the `routed_onboarding` branch, with
+  the output of `qualify()`: temperature, reason, authority age, matching loads. The
+  authority age is kept on the run session by `/carriers/verify` so the later step does not
+  ask FMCSA again (DECISIONS §66). Today that resolves to `Review` for two independent and
+  correct reasons — unknown authority age, and a call that matched no loads.
+
+### 2. `TMS_FAKE_FAULT_RATE`, and the retry log
+
+`TMS_FAKE_FAULT_RATE` (default 0) makes the fake answer that share of operational commands
+with a random truncated response or malformed frame. `DEBUG_ECHO` is never faulted; `live`
+mode ignores it (DECISIONS §67).
+
+**A deviation worth naming.** The pool holds *recoverable* faults only — a genuine timeout is
+deliberately excluded. The read deadline is 5 s under an 8 s request budget, so a real
+timeout eats the budget in one attempt and the retry never fits: every injected timeout would
+surface as a `504` instead of a recovered retry, and a demo that fails one call in ten shows
+nothing about the ladder. Say the word and it goes back in, but it changes what the knob
+demonstrates.
+
+**The metric was not real, and now is.** `logger.info` in this package was **discarded before
+being formatted**: nothing configured logging, the root logger has no handler and sits at
+WARNING, and uvicorn configures only its own loggers. The TMS client logs failures at WARNING
+and successes at INFO — so in production only the failures existed, and a retry that worked
+looked exactly like a retry that never happened. `configure_logging()` now sets the `app`
+logger to INFO with its own handler (DECISIONS §68), and both lines carry the same four
+facts: command, attempt n/N, outcome, latency — plus `retrying` / `no further attempt` on the
+failure side and `recovered after N failed attempt(s)` on the success side.
+
+```
+tms LOAD_QUERY attempt 1/3 failed: timeout after 5.001s - retrying
+tms LOAD_QUERY attempt 2/3 ok: 1 record(s) in 0.041s - recovered after 1 failed attempt(s)
+```
+
+**The booking invariant holds, and now under every fault sequence.** When `LOAD_BOOK`'s answer
+is lost *and* the `LOAD_GET` recovery fails too, the outcome is `booked_unconfirmed` with no
+reference → `booking_pending`, never `booked`. This reverses DECISIONS §11, which chose to let
+the exception propagate: that gave the carrier a generic error line and produced no rep
+ticket, for no gain. Every exit from the recovery returns no reference, so the guarantee is
+about the claim rather than the branch. §11 carries a pointer to §69, and a test walks every
+script the fake can produce and asserts none of them yields `booked`.
+
+### 3. The architecture review's cheap fixes
+
+- **`/health` is `async def`** (DECISIONS §70). A sync handler shares the 40-thread pool with
+  every TMS call, so a TMS stall could starve the probe and get a healthy service restarted —
+  which drops every call in flight.
+- **Sessions and handoff tickets are swept on the write path** (DECISIONS §71): the store
+  purges once past 500 entries, the queue drops tickets past `HANDOFF_RETENTION_SECONDS`
+  (default 24 h). No thread, no lifecycle.
+- **The event log's non-durability is documented, not fixed.** On Render there is no volume,
+  so `events.jsonl` dies with the instance; Twin is the durable store. A persistent disk is
+  $0.25/GB/month and was ruled out for the POC.
+
+### 4. Multiple reviewer MCs — **not done**
+
+The estimate is **30–45 minutes** of code plus tests (turn `REVIEWER_MC` into a list,
+`OtpService` membership check, settings validation, ~10 tests, plus a seed that uses a
+different MC per lane). That alone is over the 20-minute budget, and it is blocked anyway:
+
+**There are only two MCs with a recorded eligible verdict** — `15735` (ALLIED VAN LINES INC,
+the current reviewer MC, 21 recorded checks) and `107012` (NORTH AMERICAN VAN LINES INC).
+Everything else on record was refused: `123456` authority_inactive, `778899`
+insurance_not_on_file, `445566`/`998877` incomplete_response, `000000` not_found. FMCSA is
+403 from Argentina, so new candidates cannot be discovered from here, and enumerating them
+against the deploy means guessing MC numbers at the live FMCSA quota.
+
+**What would unblock it:** three or four MC numbers the operator knows are real, active and
+eligible. With those, the code change is the 30–45 minutes above and the seed can give each
+lane its own carrier.
+
+### 5. One thing noticed while doing the above
+
+`REVIEWER_MODE` has **no production guard.** `_enforce_production_guards` refuses a fake TMS
+and empty secrets, but a deploy with `ENV=production` and `REVIEWER_MODE=true` would start and
+issue a fixed code for the configured MC. Not changed, because the current deploy is
+`ENV=development` and enabling reviewer mode in production is exactly what an evaluator might
+want — but it is the same class of guard as §42 and worth a decision.
+
+### Tests
+
+```
+596 passed
+```
+
+New: 7 for the fake's fault rate, 5 for `load_pitched` / `lead_created`, 2 for the booking
+invariant under fault, 4 for the retry log and the logging fix, 1 for the async health
+endpoint, 8 for the sweeps.
+
 ### DIAG removed
 
 `_diag_middleware` and its registration (`app/main.py`), the `DIAG search` line

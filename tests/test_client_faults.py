@@ -26,6 +26,7 @@ from app.tms.client import TmsClient
 from app.tms.models import BookingStatus
 from app.tms.protocol import (
     TmsError,
+    TmsFault,
     TmsInvalidInput,
     TmsMalformed,
     TmsPartialResponse,
@@ -377,8 +378,77 @@ def test_an_ambiguous_booking_can_be_retried_by_a_later_call():
     assert second.status is BookingStatus.BOOKED_UNCONFIRMED
 
 
-def test_a_booking_that_cannot_be_resolved_raises_rather_than_guesses():
-    """If LOAD_GET itself is down we have no way to know, so we do not claim anything."""
+def test_a_booking_that_cannot_be_resolved_never_claims_a_reference():
+    """If LOAD_GET itself is down we cannot know anything, so we claim nothing.
+
+    This used to raise, and the carrier heard an error line with no rep behind
+    it. The invariant that matters is not the branch but the claim: whatever
+    happens on the ambiguous path, the answer is `booked_unconfirmed` with no
+    reference, never `booked`. See DECISIONS §11.
+    """
     with FakeTms(script=[PARTIAL, PARTIAL, PARTIAL, PARTIAL, PARTIAL]) as tms:
-        with pytest.raises(TmsPartialResponse):
-            make_client(tms).book_load(LOAD_ID, "123456", 2200)
+        result = make_client(tms).book_load(LOAD_ID, "123456", 2200)
+
+    assert result.status is BookingStatus.BOOKED_UNCONFIRMED
+    assert result.booking_ref is None
+    assert result.confirmed is False
+    assert result.ambiguous is True
+
+
+# --- random fault injection (TMS_FAKE_FAULT_RATE) ------------------------
+
+
+def test_a_fault_rate_of_zero_injects_nothing():
+    """The default, and the only value the deployment has ever run with."""
+    tms = FakeTms(fault_rate=0.0, random_value=lambda: 0.0)  # dice always say "yes"
+    assert tms._next_mode("LOAD_QUERY") == NORMAL
+    assert tms.injected_faults == []
+
+
+def test_a_fault_rate_of_one_faults_every_operational_command():
+    tms = FakeTms(fault_rate=1.0, random_value=lambda: 0.0)
+    for _ in range(5):
+        assert tms._next_mode("LOAD_QUERY") in {PARTIAL, MALFORMED}
+    assert len(tms.injected_faults) == 5
+
+
+def test_the_dice_are_compared_against_the_rate():
+    """A roll above the rate answers normally; one below it faults."""
+    above = FakeTms(fault_rate=0.10, random_value=lambda: 0.5)
+    below = FakeTms(fault_rate=0.10, random_value=lambda: 0.05)
+
+    assert above._next_mode("LOAD_QUERY") == NORMAL
+    assert below._next_mode("LOAD_QUERY") in {PARTIAL, MALFORMED}
+
+
+def test_debug_echo_is_never_faulted_at_random():
+    """It exists to prove the encoder; a diagnostic that fails at random is not one."""
+    tms = FakeTms(fault_rate=1.0, random_value=lambda: 0.0)
+
+    assert tms._next_mode("DEBUG_ECHO") == NORMAL
+    assert tms.injected_faults == []
+
+
+def test_the_script_still_wins_over_the_dice():
+    """A test that sequenced the faults by hand must get exactly that sequence."""
+    tms = FakeTms(script=[PARTIAL], fault_rate=1.0, random_value=lambda: 0.0)
+
+    assert tms._next_mode("LOAD_QUERY") == PARTIAL
+    assert not tms.injected_faults
+
+
+def test_a_fault_rate_outside_zero_to_one_is_refused():
+    with pytest.raises(ValueError):
+        FakeTms(fault_rate=1.5)
+    with pytest.raises(ValueError):
+        FakeTms(fault_rate=-0.1)
+
+
+def test_a_random_fault_actually_reaches_the_client():
+    """End to end: the dice make a real LOAD_QUERY fail on the wire."""
+    with FakeTms(fault_rate=1.0, random_value=lambda: 0.0) as tms:
+        client = make_client(tms)
+        with pytest.raises(TmsFault):
+            client.query_loads(EQTYPE="DRY_VAN")
+
+    assert tms.injected_faults, "no fault was injected"

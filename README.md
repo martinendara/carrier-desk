@@ -212,7 +212,29 @@ Loads only captured as `LOAD_QUERY` lines get a synthesised `LOAD_GET` record (i
 `MAX_BUY` above the posted rate) so the flow works end to end. Those invented fields are
 marked in the module; nothing about them claims to match the live server.
 
+The fake answers correctly by default. Set `TMS_FAKE_FAULT_RATE` to a probability (e.g.
+`0.10`) and it will answer that share of operational commands with a truncated response or a
+malformed frame instead — which is how the retry ladder and the ambiguous-booking recovery
+get exercised in a demo rather than only in the test suite. Both are recoverable, so the
+demo shows the ladder working; a genuine timeout is deliberately not in the pool, because
+at a 5 s read deadline under an 8 s budget it would consume the whole request and surface
+as a `504` rather than as a recovered retry. `DEBUG_ECHO` is never faulted, and `live`
+mode ignores the setting.
+
 `TMS_MODE` defaults to `live`.
+
+## Logging
+
+This service's own loggers (`app.*`) are configured at INFO by `configure_logging()`, which
+`create_app` calls. That matters for one line in particular: the TMS client logs a failure
+per attempt at WARNING and a success at INFO, so **without this the successes never existed**
+— the root logger has no handler and sits at WARNING, and uvicorn configures only its own
+loggers. "The TMS succeeded after N retries" is read off those two lines.
+
+```bash
+# what the retry ladder actually did
+grep "tms LOAD_QUERY attempt" <service log>
+```
 
 ## Tests
 
@@ -237,6 +259,8 @@ gitignored and never committed.
 | `TMS_MODE` | `live` or `fake` |
 | `TMS_HOST`, `TMS_PORT`, `TMS_TOKEN` | live TMS connection |
 | `TMS_READ_DEADLINE_SECONDS` | per-attempt read deadline (default 5) |
+| `TMS_FAKE_FAULT_RATE` | `TMS_MODE=fake` only: probability the fake answers with a fault (default 0) |
+| `HANDOFF_RETENTION_SECONDS` | how long a rep ticket stays in the in-memory queue (default 86400) |
 | `FMCSA_BASE_URL`, `FMCSA_KEY` | authority lookup |
 | `OTP_HMAC_SECRET` | key for the stored OTP digests. **Required.** The service refuses to issue codes with a secret shorter than 16 bytes. |
 | `OTP_TTL_SECONDS`, `OTP_MAX_ATTEMPTS`, `OTP_MAX_RESENDS` | 300 / 3 / 1 |

@@ -204,6 +204,11 @@ and the framing for real, at zero cost to the live data.
 
 ## 11. Bookings that cannot be resolved raise; they are not invented
 
+> **Reversed on 2026-10-03 — see §69.** The reasoning below is kept because the objection
+> it raises is still the right one to weigh; what changed is the answer to "better than
+> what?". The alternative on the table at the time was inventing a reference. The
+> alternative compared against now is an exception with no rep behind it.
+
 **Problem.** During ambiguous-booking recovery, the follow-up `LOAD_GET` can itself fail.
 We then know neither whether the load is booked nor whether it is still available.
 
@@ -1261,3 +1266,187 @@ be there is the one thing the whole design refuses to do.
 API key, and it computes a number it never sends. The only thing that goes over the wire is
 an ask — a number the carrier could have said out loud. The step fails loudly, naming the
 fixture mismatch, if the close does not happen.
+
+---
+
+## 65. `load_pitched` is emitted by the search, because the search *is* the pitch
+
+**Problem.** `v_signal_price_check` counts how often a load was pitched without booking, and
+`load_pitched` came only from `GET /loads/{load_id}` — a route the platform stopped calling
+when the detail moved into the search response (§56). The count was therefore zero for every
+load in Twin: a column that looked like data and was always empty.
+
+**Choice.** One `load_pitched` per load returned by `/loads/search`, emitted after
+`search_performed`.
+
+**Rejected.** *Counting `negotiation_opened` as a pitch.* It is a different fact — a load
+opened for negotiation was pitched *and* wanted — and collapsing them would make the signal
+unable to see the loads that were shown and never discussed, which is the interesting case.
+*Dropping the column.* The question "how many times did we show this and get nowhere" is
+worth answering.
+
+**Why.** What the agent reads out is the search response, so a load returned by a search is a
+load offered to a carrier. That is the definition of a pitch, and it now has one place to
+come from.
+
+**Known wrinkle.** The platform retries `/loads/search` (retries = 1), and a retry re-emits
+the pitch events with a new timestamp, so a retried search inflates the count. Twin row ids
+are derived from the event's timestamp, so they cannot dedupe it either. The same is already
+true of `search_performed`. Fixing it properly means deriving the row id from the event
+*content*, which is a change to `app/twin.py` and its backfill — noted, not done.
+
+---
+
+## 66. The onboarding path creates the lead, and `qualify` is called there
+
+**Problem.** `lead_created` was in the event set from the beginning (CLAUDE.md §9) and had
+never been emitted: `/otp/send` wrote nothing at all on the `routed_onboarding` path, and
+`app/onboarding/qualification.py` had no caller outside the tests. So the one thing the
+onboarding path exists to produce — a qualified lead — was computed by nothing and recorded
+nowhere.
+
+**Choice.** `/otp/send` calls `qualify()` when the dispatch is `routed_onboarding` and emits
+`lead_created` with the temperature, the reason, the authority age and the matching-load
+count. The authority age is kept on the run session by `/carriers/verify` so the later step
+does not ask FMCSA again.
+
+**Rejected.** *Creating the lead at handoff instead.* A carrier on this path cannot search —
+search is gated behind the OTP that was never issued — so `matching_loads` is structurally
+zero either way, and the handoff is a separate, optional tool the agent may never call.
+
+**Why.** The moment the service learns a carrier cannot be verified is the moment it knows
+there is a lead, and waiting for a later tool risks never recording it. The answer is `Review`
+today, for two independent reasons that both hold — the authority date is unknown (§48) and
+the call matched no loads. Both inputs are real values rather than placeholders, so the view
+will be right the day the date is sourced.
+
+---
+
+## 67. The fake TMS can be told to fail, at a rate
+
+**Problem.** The deployed fake answers correctly, always. Every path built for a faulty
+server — the retry ladder, the budget, the ambiguous-booking recovery — was exercised only by
+the test suite, against a fake the tests drive by hand. A demo of "what happens when the TMS
+is slow" would have shown nothing, because the deployed server does not have a slow mode
+switched on.
+
+**Choice.** `TMS_FAKE_FAULT_RATE` (default 0). With probability *r*, an operational command
+is answered with a **truncated response** or a **malformed frame**, chosen at random. Both
+are *recoverable*: the request reached the server, the answer did not come back whole, and a
+retry can still succeed inside the request's time budget. `DEBUG_ECHO` is excluded — it
+exists to prove the encoder, and a diagnostic that fails at random is not one. `live` mode
+ignores the setting entirely: the real server is faulty on its own schedule.
+
+**Rejected.** *A genuine timeout in the pool.* It is the fault that reads best on paper and
+is the wrong one to simulate. The read deadline is 5 s under an 8 s request budget, so a real
+timeout consumes most of the budget in one attempt and the retry never fits — every injected
+timeout would surface as a `504`, not as a recovered retry. A demo that fails outright one
+time in ten teaches nothing about the ladder; a truncated answer shows the ladder working,
+which is the point of the knob. *Faulting `LOAD_BOOK` differently.* It must fault like
+everything else, because the ambiguity it creates is the point: a booking whose answer is
+lost is the case the whole recovery path exists for, and the one that must never end in
+`booked`. *Faulting with server errors (`ERR|CODE:`).* Already covered explicitly and
+deterministically, and a response is an answer rather than an accident.
+
+**Why.** A demo that never fails proves nothing about the paths that handle failure. At 0.10
+the ladder and the recovery run for real, in front of an audience, and the invariant that
+holds under them holds visibly.
+
+---
+
+## 68. This service's loggers are configured, so its INFO lines exist
+
+**Problem.** Nothing configured logging for `app.*`. uvicorn configures only its own loggers,
+the root logger has no handler and sits at `WARNING`, so every `logger.info` in this package
+was discarded before it was formatted. One consequence mattered: the TMS client logs a
+*failure* per attempt at WARNING and a *success* at INFO, so in production a retry that
+worked was indistinguishable from a retry that never happened — and the "TMS success after
+retries" figure had nothing behind it.
+
+**Choice.** `configure_logging()` sets the level on the `app` logger and attaches one
+`StreamHandler` to it. Narrow on purpose: `logging.basicConfig(force=True)` would strip the
+root handlers pytest's `caplog` installs, turning a production fix into a broken suite.
+`propagate` stays on for the same reason.
+
+**Rejected.** *Promoting the success line to WARNING so it survives the default level.*
+Routine successes logged as warnings is how a log stops being read. *`basicConfig(force=True)`.*
+It fixes production by breaking the tests, which is the wrong trade in the wrong direction.
+
+**Why.** A log line that is not enabled is not a log line. The fix is one level and one
+handler, and it is pinned by a test that asserts the level is INFO so a later refactor cannot
+quietly take the metric away again.
+
+---
+
+## 69. An unresolvable booking is `booked_unconfirmed` with no reference
+
+**Problem.** Reverses §11. When a booking's answer is lost *and* the `LOAD_GET` that would
+resolve it fails too, the service knew nothing. §11 chose to let the exception propagate: the
+carrier heard an error line, no rep ticket was created, and the load might well have been
+booked by us.
+
+**Choice.** Return `booked_unconfirmed` with `booking_ref: None`, which the route reports as
+`booking_pending`. Every exit from the recovery returns no reference: the invariant is about
+the claim, not the branch.
+
+**Rejected.** *Keeping the raise.* It fails the carrier twice — they hear a generic error
+instead of "a rep will confirm", and nothing lands in front of a human. *Inventing a
+reference.* Still refused, and unchanged: `booked` requires a reference that arrived in a
+response we read.
+
+**Why.** §11's objection was that `booked_unconfirmed` asserts "this load left the board and
+we think it was us", which we cannot know. That objection stands, and the answer is that the
+alternative has no redeeming property: it produces the same ignorance plus a dropped ticket.
+What §11 was really protecting — never telling a carrier `booked` on a booking we could not
+read back — is now enforced by construction rather than by refusing to answer. Pinned by a
+test that walks every fault sequence the fake can produce and asserts none of them yields
+`booked`.
+
+---
+
+## 70. `/health` is async, because a starved probe restarts a healthy service
+
+**Problem.** `def health()` is a sync handler, so it runs in the same bounded threadpool
+(40 threads by default) as every TMS-touching route. During a TMS stall those threads fill
+with searches waiting out their deadlines, the probe queues behind them, the Docker
+healthcheck times out with three retries, and the host restarts a service that was working
+exactly as designed — dropping every call in flight, which is the one failure §3.2 of the
+architecture review calls the most dangerous.
+
+**Choice.** `async def health()`. It runs on the event loop, touches nothing the pool owns,
+and answers while the pool is saturated.
+
+**Rejected.** *A separate port or a second probe endpoint.* More moving parts to configure on
+the host than a one-word change. *Accepting it, since the fake TMS never stalls.* The
+deployment is one `TMS_MODE` away from a real server, and this is the configuration that is
+invisible until it is an outage.
+
+**Why.** The cost is one keyword; the failure it prevents is a restart loop under exactly the
+condition the healthcheck exists to detect. Pinned by a test that asserts the endpoint is a
+coroutine function, because the fix is a word that a tidy-up could remove.
+
+---
+
+## 71. Sessions and handoff tickets are swept on the write path, not on a timer
+
+**Problem.** Session expiry is lazy, so a session nobody reads again is never removed —
+`purge_expired` existed and had no caller in `app/`. The handoff queue only ever appended,
+and each ticket carries the call's negotiations *and their ceilings*. Both grew without
+bound.
+
+**Choice.** `get_or_create` sweeps once the store passes 500 entries; `HandoffQueue.create`
+drops tickets past a retention (default 24 h). Both run on the write path.
+
+**Rejected.** *A background sweeper thread.* Correct, and more machinery: lifecycle to start,
+stop and monitor, plus a thread per container built — and the test suite builds one per test.
+*Sweeping from `/health`.* It runs on a timer for free, and it makes a liveness probe mutate
+state; a probe that stops being polled silently stops the cleanup. *Sweeping on every write.*
+O(n) per call for no reason, when amortising it costs nothing.
+
+**Why.** The sweep only has to happen at all when something is being added, so the write path
+is where the work already is. The bound is on growth, which is the actual problem — a quiet
+service with stale entries in memory is not leaking.
+
+**Trade-off, named.** The sweep happens on the *next* write, not at the moment of expiry. So
+a store that stops receiving calls keeps whatever it had. That is bounded by the last sweep,
+which is the guarantee that matters.

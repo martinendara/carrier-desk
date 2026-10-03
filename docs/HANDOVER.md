@@ -5,7 +5,7 @@ For a fresh session to resume without re-deriving anything. Read this, then
 
 ## Repo state
 
-- Branch `main`. Tests: **554 passed**; GitHub Actions **green**.
+- Branch `main`. Tests: **596 passed**; GitHub Actions **green**.
 - Commit: the commit this file ships in (`git rev-parse --short HEAD`).
 - `python -m pytest` is the whole suite; it needs no `.env` (fake TMS + mocked FMCSA).
 
@@ -99,24 +99,18 @@ by the file, so re-pasting it is the update path.
   `commodity_type`, `posted_rate` (no ceiling for the agent, but the ceiling is
   in the event).
 
-### Two gaps the Signals views expose
+### Two gaps the Signals views had — both closed (2026-10-03)
 
-The seed run in `scripts/qa_run.py --seed` produces data for all of them, but
-two fields the views would rather have are not emitted:
-
-1. **`load_pitched`** is written only by `GET /loads/{load_id}`, a route the
-   platform no longer calls (DECISIONS §56 moved the detail into the search
-   response). So `v_signal_price_check.pitches` is 0 for every load. Minimal
-   change: emit `LOAD_PITCHED` per load in `/loads/search`, where the shown
-   loads are already recorded.
-2. **`lead_created`** is defined in CLAUDE.md §9 and never emitted:
-   `/otp/send` writes nothing on the `routed_onboarding` path, and
-   `app/onboarding/qualification.py::qualify` has no caller outside the tests.
-   `v_onboarding_leads` therefore builds on `handoff_created` with
-   `reason = 'onboarding'`, and its `temperature` / `lead_reason` /
-   `authority_age_days` columns are NULL. Minimal change: call `qualify()` in
-   `/otp/send` when the dispatch is `routed_onboarding` and emit `lead_created`
-   with its result.
+1. **`load_pitched`** was written only by `GET /loads/{load_id}`, a route the
+   platform no longer calls, so `v_signal_price_check.pitches` was 0 for every
+   load. It is now emitted once per load returned by `/loads/search`
+   (DECISIONS §65). A retried search inflates the count — see the note there.
+2. **`lead_created`** was never emitted: `/otp/send` wrote nothing on the
+   `routed_onboarding` path and `qualify()` had no caller outside the tests.
+   It is now emitted there with the temperature (DECISIONS §66), so
+   `v_onboarding_leads.temperature` / `lead_reason` / `authority_age_days` /
+   `matching_loads` fill in. Expect `Review` today: the authority age is
+   unknown (§48) and the call matched no loads.
 
 ## Reviewer mode (evaluation only)
 
@@ -129,16 +123,42 @@ two fields the views would rather have are not emitted:
 ## Render env vars (names only — values are in the dashboard, never the repo)
 
 `PORT`, `ENV`, `TMS_MODE`, `TMS_HOST`, `TMS_PORT`, `TMS_TOKEN`,
-`TMS_READ_DEADLINE_SECONDS`, `TMS_FAKE_FIXTURES`, `FMCSA_BASE_URL`, `FMCSA_KEY`,
+`TMS_READ_DEADLINE_SECONDS`, `TMS_FAKE_FIXTURES`, `TMS_FAKE_FAULT_RATE`,
+`FMCSA_BASE_URL`, `FMCSA_KEY`,
 `FMCSA_TIMEOUT_SECONDS`, `OTP_HMAC_SECRET`, `OTP_TTL_SECONDS`,
 `OTP_MAX_ATTEMPTS`, `OTP_MAX_RESENDS`, `OTP_VERIFY_RATE_LIMIT_PER_HOUR`,
 `RESEND_API_KEY`, `RESEND_TIMEOUT_SECONDS`, `SERVICE_API_KEY`,
 `NEGOTIATION_STEPS`, `NEGOTIATION_URGENT_STEPS`, `NEGOTIATION_MAX_ROUNDS`,
 `NEGOTIATION_INCREMENT`, `NEGOTIATION_CEILING_MARGIN`,
-`RUN_SESSION_TTL_SECONDS`, `REQUEST_BUDGET_SECONDS`, `EVENTS_JSONL_PATH`,
+`RUN_SESSION_TTL_SECONDS`, `HANDOFF_RETENTION_SECONDS`, `REQUEST_BUDGET_SECONDS`,
+`EVENTS_JSONL_PATH`,
 `APP_VERSION`, `TWIN_ENABLED`, `TWIN_BASE_URL`, `HR_PLATFORM_API_KEY`,
 `TWIN_TABLE`, `TWIN_TIMEOUT_SECONDS`, `TWIN_MAX_ATTEMPTS`, `REVIEWER_MODE`,
 `REVIEWER_MC`, `REVIEWER_OTP`.
+
+## What `TMS_FAKE_FAULT_RATE` does, and why it matters
+
+`TMS_MODE=fake` answers correctly, always, unless `TMS_FAKE_FAULT_RATE` is above
+0. Set to `0.10`, one operational command in ten is answered with a truncated
+response or a malformed frame instead — so a demo exercises the retry ladder and
+the ambiguous-booking recovery rather than only asserting them in tests. Both are
+recoverable; a genuine timeout is deliberately not in the pool, because at a 5 s
+read deadline under an 8 s budget it would burn the request and surface as a
+`504` rather than as a retry.
+
+Two things make that safe, and both are tested:
+
+- **`LOAD_BOOK` stays idempotent per call.** The booking outcome is stored on
+  the session under a lock, so a retried `/bookings` never issues a second
+  `LOAD_BOOK`.
+- **An unresolved booking is never `booked`.** Every exit from the recovery path
+  returns `booked_unconfirmed` with `booking_ref: None`, which the route reports
+  as `booking_pending`. A test walks every fault script the fake can produce and
+  asserts none yields `booked`.
+
+What it changes for a viewer: a booking now has a real chance of ending in
+`booking_pending` instead of `booked`. That is the point, and it is worth saying
+out loud before a demo.
 
 ## QA plan (approved — do not run until the operator OKs)
 
