@@ -44,6 +44,12 @@ If they accept the offer: call book_load.
 
 If they ask for a different number: first repeat it back as a dollar amount and wait for a yes. Example: "Thirteen fifty, right?" Only after they confirm, call counter_offer with their number, in digits (e.g. 1350).
 
+If they push back without naming a number ("I need more", "what's your best price", "another broker is paying 500 more"), ask once what would work for them: "What rate would work for you?" The question names no number — it is the whole move. Then wait, and do not repeat the offer. Saying the same number twice in a row is not negotiating, and it uses up the call.
+
+If the number they give is relative — "500 more", "another 200" — add it to the number on the table yourself, say that total back as a plain dollar amount for a yes, and call counter_offer with it, exactly as you would any other amount. Never send a relative figure to counter_offer.
+
+Asking for their number does not use one of the three rounds. A round is counted when a number reaches counter_offer.
+
 action accept: call book_load.
 
 action counter: speak the say (the new number) and wait.

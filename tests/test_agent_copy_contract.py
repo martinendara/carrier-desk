@@ -72,6 +72,11 @@ FORBIDDEN_CEILING_WORDS = (
     "the most we can pay",
 )
 
+#: The move the prompt gives the agent when a carrier pushes without naming a
+#: price. It is a question and nothing else: the moment it carries a number it
+#: has become the proposal the negotiation section forbids.
+ASK_FOR_THEIR_NUMBER = "What rate would work for you?"
+
 
 # --- a close must not hint at a ceiling ---------------------------------
 
@@ -235,6 +240,66 @@ def test_the_guardrail_forbids_the_implication_and_not_only_the_words():
     line = _guardrail_line(_prompt()).lower()
 
     assert "never hint that there is a higher number" in line
+
+
+# --- the prompt: pushing back without a number --------------------------
+
+
+def _negotiation(prompt: str) -> str:
+    return prompt.split("5. Negotiation", 1)[1].split("6. Booking", 1)[0]
+
+
+def test_the_prompt_asks_for_a_number_instead_of_repeating_the_offer():
+    """The failure this pins: a carrier pushes without naming a price and the
+    agent repeats the same offer until it runs out of turns — no counter_offer,
+    no close, no outcome."""
+    section = _negotiation(_prompt()).lower()
+
+    assert "ask once what would work for them" in section
+    assert "do not repeat the offer" in section
+    assert "saying the same number twice in a row is not negotiating" in section
+
+
+def test_the_question_the_agent_asks_carries_no_number():
+    """Asking is allowed; proposing is not, and a number in the question is a
+    proposal wearing a question mark. It must also hint at no ceiling."""
+    assert ASK_FOR_THEIR_NUMBER in _prompt()
+
+    assert not re.search(r"\d", ASK_FOR_THEIR_NUMBER)
+    assert CAP_WORDS.search(ASK_FOR_THEIR_NUMBER) is None
+
+
+def test_a_relative_amount_is_converted_and_confirmed_before_it_is_sent():
+    """'500 more' is not an amount — counter_offer takes a total, and the
+    carrier has to hear the total before it goes."""
+    section = _negotiation(_prompt())
+
+    assert '"500 more", "another 200"' in section
+    assert "add it to the number on the table yourself" in section
+    assert "say that total back as a plain dollar amount for a yes" in section
+    assert "Never send a relative figure to counter_offer" in section
+
+
+def test_the_prompt_says_asking_does_not_cost_a_round():
+    """Otherwise the agent hoards the three rounds and refuses to ask."""
+    section = _negotiation(_prompt())
+
+    assert "does not use one of the three rounds" in section
+    assert "counted when a number reaches counter_offer" in section
+
+
+def test_asking_for_their_number_is_not_a_licence_to_propose_one():
+    """The new rule has to sit beside the old prohibition, not replace it."""
+    assert "Never propose a number yourself." in _negotiation(_prompt())
+
+
+def test_the_pushback_rule_adds_no_ceiling_word():
+    """Everything the agent newly says is the one question, so that is what is
+    checked — the section also quotes the forbidden words in its guardrails."""
+    added = _negotiation(_prompt()).split("(e.g. 1350).", 1)[1].split("action accept:", 1)[0]
+
+    for word in FORBIDDEN_CEILING_WORDS:
+        assert word not in added.lower(), f"the new rule introduces {word!r}"
 
 
 # --- the prompt: the MC length ------------------------------------------
