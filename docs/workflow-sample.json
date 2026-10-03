@@ -461,7 +461,7 @@
             "type": "paragraph",
             "children": [
               {
-                "text": "Callers are US truck drivers and carrier dispatchers looking for freight loads. They will say MC numbers (6 to 7 digits), US city and state names, equipment types (dry van, reefer, flatbed) and dollar rates."
+                "text": "Callers are US truck drivers and carrier dispatchers looking for freight loads. They will say MC numbers (digits only, no fixed length), US city and state names, equipment types (dry van, reefer, flatbed) and dollar rates."
               }
             ]
           }
